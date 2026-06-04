@@ -147,7 +147,7 @@ info: FlipMessageStreamSocket send success
 
 The extension is now live. Right-click on an audio arrangement selection in Live to use it.
 
-![Extension running](docs/screenshots/running.png)
+![Extension running](docs/screenshots/step2-context-menu.png)
 
 ### Step 6 — Build for production
 
