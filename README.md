@@ -36,15 +36,19 @@ Target (spectral shape) + Brain (sound material) → new audio clip
 
 ## How to use
 
-1. In the **Arrangement View**, select a time range on an audio track (click + drag)
-2. Right-click → **SampleBrain…**
-3. In the dialog:
-   - **Target** = the track you right-clicked (defines the spectral shape)
-   - **Brain Sources** = check one or more tracks to use as sound material
-   - Adjust parameters, click **Generate ▶**
-4. A new track `SB: <target name>` appears with the result
+**Step 1 — Select a time range** on an audio track in the Arrangement View (click + drag)
 
-![Dialog screenshot](docs/screenshots/dialog.png)
+![Step 1 — Select a time range](docs/screenshots/step1-selection.png)
+
+**Step 2 — Right-click → Extensions → SampleBrain…**
+
+![Step 2 — Context menu](docs/screenshots/step2-context-menu.png)
+
+**Step 3 — Configure and Generate** — check at least one brain source, adjust parameters, click **Generate ▶**
+
+![Step 3 — Dialog](docs/screenshots/step3-dialog.png)
+
+A new track `SB: <target name>` appears with the result.
 
 ### Parameters
 
