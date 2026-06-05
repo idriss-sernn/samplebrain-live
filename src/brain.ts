@@ -21,10 +21,14 @@ export interface BrainParams {
 }
 
 export interface MatchParams {
-  novelty: number;    // 0.0–1.0 — bias against already-used blocks
-  boredom: number;    // 0.0–1.0 — decay rate of usage counts
-  stickiness: number; // 0.0–1.0 — tendency to follow adjacent blocks
-  voices: number;     // 1–4 — simultaneous brain blocks per target grain
+  novelty: number;      // 0.0–1.0 — bias against already-used blocks
+  boredom: number;      // 0.0–1.0 — decay rate of usage counts
+  stickiness: number;   // 0.0–1.0 — tendency to follow adjacent blocks
+  voices: number;       // 1–4 — simultaneous brain blocks per target grain
+  pitchShift: number;   // semitones center offset (negative = down)
+  pitchShiftVar: number;// semitones random variance ≥ 0
+  reverse: number;      // 0.0–1.0 — probability grain is played backwards
+  density: number;      // 0.0–1.0 — probability a grain is created at all
 }
 
 function segmentPcm(pcm: Float64Array, params: BrainParams): Block[] {
@@ -71,7 +75,7 @@ export function synthesize(
 ): Float64Array {
   if (brainBlocks.length === 0 || targetBlocks.length === 0) return new Float64Array(0);
 
-  const { novelty, boredom, stickiness, voices } = matchParams;
+  const { novelty, boredom, stickiness, voices, pitchShift, pitchShiftVar, reverse, density } = matchParams;
   const numVoices = Math.max(1, Math.min(4, Math.round(voices)));
   const blockSize = brainBlocks[0]!.pcm.length;
   const outputLen = hopSize * targetBlocks.length + blockSize;
@@ -86,6 +90,9 @@ export function synthesize(
   const stickinessThreshold = 0.5 * stickiness;
 
   for (let t = 0; t < targetBlocks.length; t++) {
+    // density — skip grain probabilistically
+    if (density < 1 && Math.random() > density) continue;
+
     const targetDesc = targetBlocks[t]!.descriptor;
 
     let primaryIdx: number;
@@ -108,24 +115,16 @@ export function synthesize(
 
     for (let i = 0; i < usageCount.length; i++) usageCount[i]! *= (1 - boredom * 0.1);
 
+    const outPos = t * hopSize;
+
     if (numVoices === 1) {
       usageCount[primaryIdx]! += 1;
-      const brainPcm = brainBlocks[primaryIdx]!.pcm;
-      const outPos = t * hopSize;
-      for (let i = 0; i < blockSize && outPos + i < outputLen; i++) {
-        output[outPos + i]! += brainPcm[i]! * win[i]!;
-        normSum[outPos + i]! += win[i]!;
-      }
+      olaGrain(brainBlocks[primaryIdx]!.pcm, win, output, normSum, outPos, outputLen, pitchShift, pitchShiftVar, reverse, 1);
     } else {
       const topN = knnTopN(targetDesc, brainBlocks, usageCount, novelty, numVoices);
-      const outPos = t * hopSize;
       for (const { idx, weight } of topN) {
         usageCount[idx]! += 1;
-        const brainPcm = brainBlocks[idx]!.pcm;
-        for (let i = 0; i < blockSize && outPos + i < outputLen; i++) {
-          output[outPos + i]! += brainPcm[i]! * win[i]! * weight;
-          normSum[outPos + i]! += win[i]! * weight;
-        }
+        olaGrain(brainBlocks[idx]!.pcm, win, output, normSum, outPos, outputLen, pitchShift, pitchShiftVar, reverse, weight);
       }
     }
   }
@@ -135,6 +134,44 @@ export function synthesize(
   }
 
   return output;
+}
+
+function olaGrain(
+  src: Float64Array,
+  win: Float64Array,
+  output: Float64Array,
+  normSum: Float64Array,
+  outPos: number,
+  outputLen: number,
+  pitchShift: number,
+  pitchShiftVar: number,
+  reverse: number,
+  weight: number,
+): void {
+  const blockSize = src.length;
+  const semitones = pitchShift + (pitchShiftVar > 0 ? (Math.random() * 2 - 1) * pitchShiftVar : 0);
+  const pitched = Math.abs(semitones) > 0.01 ? resampleGrain(src, semitones) : src;
+  const rev = reverse > 0 && Math.random() < reverse;
+
+  for (let i = 0; i < blockSize && outPos + i < outputLen; i++) {
+    const s = pitched[rev ? blockSize - 1 - i : i]!;
+    output[outPos + i]! += s * win[i]! * weight;
+    normSum[outPos + i]! += win[i]! * weight;
+  }
+}
+
+function resampleGrain(pcm: Float64Array, semitones: number): Float64Array {
+  const ratio = Math.pow(2, semitones / 12);
+  const out = new Float64Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) {
+    const pos = i * ratio;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    const a = idx < pcm.length ? pcm[idx]! : 0;
+    const b = idx + 1 < pcm.length ? pcm[idx + 1]! : 0;
+    out[i] = a + frac * (b - a);
+  }
+  return out;
 }
 
 function knnSearch(

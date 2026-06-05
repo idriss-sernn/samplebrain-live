@@ -156,7 +156,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     if (stale()) { res.writeHead(409).end(); return; }
 
     const hopSize = Math.max(1, Math.round(blockSizeSamples * (1 - p.overlapRatio)));
-    const matchParams: MatchParams = { novelty: p.novelty, boredom: p.boredom, stickiness: p.stickiness, voices: p.voices };
+    const matchParams: MatchParams = { novelty: p.novelty, boredom: p.boredom, stickiness: p.stickiness, voices: p.voices, pitchShift: p.pitchShift, pitchShiftVar: p.pitchShiftVar, reverse: p.reverse, density: p.density };
     const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
     const wavBuf = encodeWav(output, sampleRate, p.ampWeight);
 
@@ -170,7 +170,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
 
   let rawResult: string;
   try {
-    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 768);
+    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 880);
   } finally {
     server.closeAllConnections?.();
     server.close();
@@ -298,6 +298,10 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         boredom: params.boredom,
         stickiness: params.stickiness,
         voices: params.voices,
+        pitchShift: params.pitchShift,
+        pitchShiftVar: params.pitchShiftVar,
+        reverse: params.reverse,
+        density: params.density,
       };
       const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
       console.log(`SampleBrain: output ${output.length} samples`);
@@ -353,6 +357,10 @@ interface DialogResult {
   stickiness: number;
   ampWeight: number;
   voices: number;
+  pitchShift: number;
+  pitchShiftVar: number;
+  reverse: number;
+  density: number;
 }
 
 interface PreviewRequest {
@@ -368,4 +376,8 @@ interface PreviewRequest {
   stickiness: number;
   ampWeight: number;
   voices: number;
+  pitchShift: number;
+  pitchShiftVar: number;
+  reverse: number;
+  density: number;
 }

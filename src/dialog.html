@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SampleBrain</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-user-select: none; user-select: none; }
   :root {
     --bg:     #f9f9f9;
     --dot:    rgba(0,0,0,0.07);
@@ -425,6 +425,30 @@ Lower = leaves headroom before clipping.">?</span>
         <span class="sl-val"><span id="aw-v">100</span>%</span>
       </div>
     </div>
+    <div class="param">
+      <div class="lbl-row">
+        <span class="lbl">Pitch</span>
+        <span class="help" data-tip="Pitch shift applied to every grain, in semitones.
+0 = no shift. Negative = down, positive = up.
+Use with Spread for harmonic clouds.">?</span>
+      </div>
+      <div class="sl-row">
+        <input type="range" id="pitch-shift" min="-24" max="24" step="1" value="0">
+        <span class="sl-val"><span id="ps-v">+0</span>st</span>
+      </div>
+    </div>
+    <div class="param">
+      <div class="lbl-row">
+        <span class="lbl">Pitch spread</span>
+        <span class="help" data-tip="Random pitch variance per grain (±semitones).
+0 = all grains at the Pitch value.
+12 = random ±1 octave per grain.">?</span>
+      </div>
+      <div class="sl-row">
+        <input type="range" id="pitch-var" min="0" max="24" step="1" value="0">
+        <span class="sl-val">±<span id="pv-v">0</span>st</span>
+      </div>
+    </div>
   </div>
 
   <div class="param-full" id="mfcc-row" style="display:none">
@@ -486,6 +510,26 @@ Lower = more random jumps in the brain.">?</span>
       </div>
       <input type="range" id="voices" min="1" max="4" step="1" value="1">
       <div class="net-val" id="vc-v">1</div>
+    </div>
+    <div class="netcell">
+      <div class="lbl-row">
+        <span class="lbl">Reverse</span>
+        <span class="help" data-tip="Probability a grain is played backwards.
+0 = never reversed.
+1 = always reversed.">?</span>
+      </div>
+      <input type="range" id="reverse" min="0" max="100" step="5" value="0">
+      <div class="net-val" id="rv-v">0.00</div>
+    </div>
+    <div class="netcell">
+      <div class="lbl-row">
+        <span class="lbl">Density</span>
+        <span class="help" data-tip="Probability a grain is created.
+1 = every grain plays (full).
+Lower = random gaps — rhythmic holes.">?</span>
+      </div>
+      <input type="range" id="density" min="0" max="100" step="5" value="100">
+      <div class="net-val" id="dn-v">1.00</div>
     </div>
   </div>
 
@@ -646,14 +690,18 @@ Click ▶ to audition before committing.">?</span>
     paint(false);
   }
 
-  bind('block-size', 'bs-v', v => v);
-  bind('overlap',    'ov-v', v => v);
-  bind('mfcc-ratio', 'mr-v', v => v);
-  bind('amp-weight', 'aw-v', v => v);
-  bind('novelty',    'nv-v', v => (v/100).toFixed(2));
-  bind('boredom',    'bd-v', v => (v/100).toFixed(2));
-  bind('stickiness', 'sk-v', v => (v/100).toFixed(2));
-  bind('voices',     'vc-v', v => String(Math.round(v)));
+  bind('block-size',  'bs-v', v => v);
+  bind('overlap',     'ov-v', v => v);
+  bind('mfcc-ratio',  'mr-v', v => v);
+  bind('amp-weight',  'aw-v', v => v);
+  bind('pitch-shift', 'ps-v', v => (v >= 0 ? '+' : '') + v);
+  bind('pitch-var',   'pv-v', v => v);
+  bind('novelty',     'nv-v', v => (v/100).toFixed(2));
+  bind('boredom',     'bd-v', v => (v/100).toFixed(2));
+  bind('stickiness',  'sk-v', v => (v/100).toFixed(2));
+  bind('voices',      'vc-v', v => String(Math.round(v)));
+  bind('reverse',     'rv-v', v => (v/100).toFixed(2));
+  bind('density',     'dn-v', v => (v/100).toFixed(2));
 
   document.getElementById('descriptor-type').addEventListener('change', function() {
     document.getElementById('mfcc-row').style.display = this.value === 'mix' ? '' : 'none';
@@ -681,10 +729,11 @@ Click ▶ to audition before committing.">?</span>
     document.body.classList.toggle('dark', dark);
     themeBtn.textContent = dark ? '◑' : '◐';
     paintAllSliders();
+    if (previewAudioBuf) drawWaveform(previewAudioBuf);
   };
 
   document.getElementById('rnd-btn').addEventListener('click', () => {
-    ['block-size', 'overlap', 'amp-weight', 'novelty', 'boredom', 'stickiness', 'voices'].forEach(id => {
+    ['block-size', 'overlap', 'amp-weight', 'pitch-shift', 'pitch-var', 'novelty', 'boredom', 'stickiness', 'voices', 'reverse', 'density'].forEach(id => {
       const el = document.getElementById(id);
       const min = +el.min, max = +el.max, step = +el.step || 5;
       const steps = Math.floor((max - min) / step);
@@ -715,6 +764,10 @@ Click ▶ to audition before committing.">?</span>
       stickiness:   +document.getElementById('stickiness').value / 100,
       ampWeight:    +document.getElementById('amp-weight').value / 100,
       voices:        +document.getElementById('voices').value,
+      pitchShift:    +document.getElementById('pitch-shift').value,
+      pitchShiftVar: +document.getElementById('pitch-var').value,
+      reverse:       +document.getElementById('reverse').value / 100,
+      density:       +document.getElementById('density').value / 100,
     };
   }
 
@@ -747,8 +800,11 @@ Click ▶ to audition before committing.">?</span>
     ctx2d.clearRect(0, 0, W, H);
     const data = audioBuffer.getChannelData(0);
     const step = Math.max(1, Math.floor(data.length / W));
-    const isDark = document.body.classList.contains('dark');
-    ctx2d.strokeStyle = isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.75)';
+    const cs = getComputedStyle(document.body);
+    const colorFull = cs.getPropertyValue('--full').trim() || '#000';
+    const colorLine = cs.getPropertyValue('--line2').trim() || 'rgba(0,0,0,0.10)';
+    ctx2d.strokeStyle = colorFull;
+    ctx2d.globalAlpha = 0.75;
     ctx2d.lineWidth = 1;
     ctx2d.beginPath();
     for (let x = 0; x < W; x++) {
@@ -765,7 +821,8 @@ Click ▶ to audition before committing.">?</span>
     }
     ctx2d.stroke();
     // centre line
-    ctx2d.strokeStyle = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)';
+    ctx2d.globalAlpha = 1;
+    ctx2d.strokeStyle = colorLine;
     ctx2d.beginPath();
     ctx2d.moveTo(0, H / 2);
     ctx2d.lineTo(W, H / 2);
@@ -821,7 +878,7 @@ Click ▶ to audition before committing.">?</span>
   });
 
   // Hook all param changes → schedule preview
-  ['block-size','overlap','amp-weight','novelty','boredom','stickiness','mfcc-ratio','voices']
+  ['block-size','overlap','amp-weight','pitch-shift','pitch-var','novelty','boredom','stickiness','mfcc-ratio','voices','reverse','density']
     .forEach(id => document.getElementById(id).addEventListener('input', schedulePreview));
   ['window-type','descriptor-type']
     .forEach(id => document.getElementById(id).addEventListener('change', schedulePreview));
