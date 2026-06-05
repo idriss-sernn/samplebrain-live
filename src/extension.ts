@@ -55,6 +55,8 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       .filter(({ index }) => index !== targetAudioIdx),
   };
 
+  let pendingPreviewId = 0;
+
   // Serve the dialog HTML with injected data over a local HTTP server
   const server = http.createServer((req, res) => {
     const reqUrl = new URL(req.url ?? "/", `http://127.0.0.1`);
@@ -87,17 +89,88 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
           res.writeHead(500).end();
         }
       });
+    } else if (req.method === "POST" && reqUrl.pathname === "/preview") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => void runPreview(
+        ++pendingPreviewId,
+        () => pendingPreviewId,
+        JSON.parse(Buffer.concat(chunks).toString()) as PreviewRequest,
+        res,
+      ).catch((err) => { if (!res.writableEnded) res.writeHead(500).end(String(err)); }));
     } else {
       res.writeHead(404).end();
     }
   });
+
+  async function runPreview(
+    myId: number,
+    currentId: () => number,
+    p: PreviewRequest,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const stale = () => myId !== currentId();
+    if (stale()) { res.writeHead(409).end(); return; }
+
+    const selStart = selection.time_selection_start;
+    const selEnd = selection.time_selection_end;
+    if (selEnd - selStart < 0.01) { res.writeHead(400).end(); return; }
+
+    const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
+    if (stale()) { res.writeHead(409).end(); return; }
+    const targetData = await decodeWav(targetWavPath);
+    if (stale()) { res.writeHead(409).end(); return; }
+
+    const brainPcms: Float64Array[] = [];
+    for (const idx of p.brainTrackIndices) {
+      if (stale()) { res.writeHead(409).end(); return; }
+      const track = allAudio[idx];
+      if (!track || track.arrangementClips.length === 0) continue;
+      const brainEnd = Math.max(...track.arrangementClips.map((c) => c.endTime));
+      const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
+      if (stale()) { res.writeHead(409).end(); return; }
+      const brainData = await decodeWav(brainWavPath);
+      brainPcms.push(brainData.samples);
+    }
+    for (const filePath of p.droppedFiles) {
+      if (stale()) { res.writeHead(409).end(); return; }
+      try { brainPcms.push((await decodeWav(filePath)).samples); } catch { /* skip */ }
+    }
+
+    if (brainPcms.length === 0) { res.writeHead(400).end(); return; }
+    if (stale()) { res.writeHead(409).end(); return; }
+
+    const { sampleRate } = targetData;
+    const blockSizeSamples = Math.max(64, Math.round((p.blockSizeMs / 1000) * sampleRate));
+    const brainParams: BrainParams = {
+      blockSizeSamples,
+      overlapRatio: p.overlapRatio,
+      windowType: p.windowType as BrainParams["windowType"],
+      descriptorType: p.descriptorType as BrainParams["descriptorType"],
+      mfccRatio: p.mfccRatio,
+      sampleRate,
+    };
+    const brainBlocks = buildBrain(brainPcms, brainParams);
+    const targetBlocks = buildTarget(targetData.samples, brainParams);
+    if (brainBlocks.length === 0 || targetBlocks.length === 0) { res.writeHead(400).end(); return; }
+    if (stale()) { res.writeHead(409).end(); return; }
+
+    const hopSize = Math.max(1, Math.round(blockSizeSamples * (1 - p.overlapRatio)));
+    const matchParams: MatchParams = { novelty: p.novelty, boredom: p.boredom, stickiness: p.stickiness, voices: p.voices };
+    const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
+    const wavBuf = encodeWav(output, sampleRate, p.ampWeight);
+
+    if (stale()) { res.writeHead(409).end(); return; }
+    res.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": String(wavBuf.length) });
+    res.end(wavBuf);
+  }
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const { port } = server.address() as net.AddressInfo;
 
   let rawResult: string;
   try {
-    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 648);
+    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 768);
   } finally {
     server.closeAllConnections?.();
     server.close();
@@ -224,6 +297,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         novelty: params.novelty,
         boredom: params.boredom,
         stickiness: params.stickiness,
+        voices: params.voices,
       };
       const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
       console.log(`SampleBrain: output ${output.length} samples`);
@@ -278,4 +352,20 @@ interface DialogResult {
   boredom: number;
   stickiness: number;
   ampWeight: number;
+  voices: number;
+}
+
+interface PreviewRequest {
+  brainTrackIndices: number[];
+  droppedFiles: string[];
+  blockSizeMs: number;
+  overlapRatio: number;
+  windowType: string;
+  descriptorType: string;
+  mfccRatio: number;
+  novelty: number;
+  boredom: number;
+  stickiness: number;
+  ampWeight: number;
+  voices: number;
 }

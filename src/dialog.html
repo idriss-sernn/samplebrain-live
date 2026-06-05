@@ -286,6 +286,45 @@
   body.dark .help { border-color: rgba(255,255,255,0.45); color: rgba(255,255,255,0.50); }
   body.dark .pgrid .param { background: rgba(255,255,255,0.02); }
   body.dark .hd-logo { filter: invert(1); opacity: .65; }
+
+  /* ── VOICES SLIDER (netcell extra) ── */
+  .netgrid { grid-template-columns: 1fr 1fr; }
+
+  /* ── PREVIEW SECTION ── */
+  .preview-section {
+    padding: 9px 16px 7px;
+    border-bottom: 1px solid var(--line);
+  }
+  .preview-canvas-wrap {
+    margin-top: 5px;
+    height: 60px;
+    background: rgba(0,0,0,0.04);
+    border: 1px solid var(--line2);
+    position: relative;
+    overflow: hidden;
+  }
+  body.dark .preview-canvas-wrap { background: rgba(255,255,255,0.03); }
+  canvas#preview-canvas { display: block; width: 100%; height: 100%; }
+  .preview-status-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 4px;
+    font-size: 9px; color: var(--dim); letter-spacing: .08em;
+  }
+  .btn-play {
+    font-family: inherit; font-size: 10px; font-weight: 700;
+    padding: 3px 9px; letter-spacing: .10em; text-transform: uppercase;
+    border: 1.5px solid var(--line); background: transparent; color: var(--dim);
+    cursor: pointer; border-radius: 0; transition: all .1s;
+  }
+  .btn-play:not(:disabled):hover { border-color: var(--full); color: var(--full); }
+  .btn-play:disabled { opacity: .35; cursor: not-allowed; }
+  .preview-spinner {
+    display: inline-block; width: 8px; height: 8px;
+    border: 1.5px solid var(--dim); border-top-color: var(--full);
+    border-radius: 50%; animation: spin .6s linear infinite;
+    margin-right: 5px; vertical-align: middle; flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -438,6 +477,32 @@ Lower = more random jumps in the brain.">?</span>
       <input type="range" id="stickiness" min="0" max="100" step="5" value="30">
       <div class="net-val" id="sk-v">0.30</div>
     </div>
+    <div class="netcell">
+      <div class="lbl-row">
+        <span class="lbl">Voices</span>
+        <span class="help" data-tip="Number of simultaneous brain blocks mixed per grain.
+1 = classic single-voice (original SampleBrain).
+2–4 = polyphonic — richer, denser texture.">?</span>
+      </div>
+      <input type="range" id="voices" min="1" max="4" step="1" value="1">
+      <div class="net-val" id="vc-v">1</div>
+    </div>
+  </div>
+
+  <div class="preview-section">
+    <div class="lbl-row">
+      <span class="lbl">Preview</span>
+      <span class="help" data-tip="Live preview of the synthesised output.
+Updates automatically when you change parameters (300ms debounce).
+Click ▶ to audition before committing.">?</span>
+    </div>
+    <div class="preview-canvas-wrap">
+      <canvas id="preview-canvas"></canvas>
+    </div>
+    <div class="preview-status-row">
+      <span id="preview-status">Select brain sources to preview</span>
+      <button class="btn-play" id="btn-play" disabled>▶</button>
+    </div>
   </div>
 
 </div>
@@ -537,6 +602,12 @@ Lower = more random jumps in the brain.">?</span>
     document.getElementById('ft-info').innerHTML =
       n === 0 ? 'Select brain sources'
               : '<span>' + n + '</span> source' + (n > 1 ? 's' : '') + ' &middot; ready';
+    if (n === 0) {
+      setStatus('Select brain sources to preview', false);
+      document.getElementById('btn-play').disabled = true;
+    } else {
+      schedulePreview();
+    }
   }
 
   function sliderColors() {
@@ -580,6 +651,7 @@ Lower = more random jumps in the brain.">?</span>
   bind('novelty',    'nv-v', v => (v/100).toFixed(2));
   bind('boredom',    'bd-v', v => (v/100).toFixed(2));
   bind('stickiness', 'sk-v', v => (v/100).toFixed(2));
+  bind('voices',     'vc-v', v => String(Math.round(v)));
 
   document.getElementById('descriptor-type').addEventListener('change', function() {
     document.getElementById('mfcc-row').style.display = this.value === 'mix' ? '' : 'none';
@@ -610,7 +682,7 @@ Lower = more random jumps in the brain.">?</span>
   };
 
   document.getElementById('rnd-btn').addEventListener('click', () => {
-    ['block-size', 'overlap', 'amp-weight', 'novelty', 'boredom', 'stickiness'].forEach(id => {
+    ['block-size', 'overlap', 'amp-weight', 'novelty', 'boredom', 'stickiness', 'voices'].forEach(id => {
       const el = document.getElementById(id);
       const min = +el.min, max = +el.max, step = +el.step || 5;
       const steps = Math.floor((max - min) / step);
@@ -625,21 +697,135 @@ Lower = more random jumps in the brain.">?</span>
     descEl.dispatchEvent(new Event('change'));
   });
 
-  document.getElementById('btn-cancel').onclick = () => send({ cancelled: true });
-  document.getElementById('btn-gen').onclick = () => send({
-    cancelled: false,
-    brainTrackIndices: Array.from(checked),
-    droppedFiles: droppedFiles.map(f => f.path),
-    blockSizeMs:   +document.getElementById('block-size').value,
-    overlapRatio:  +document.getElementById('overlap').value / 100,
-    windowType:     document.getElementById('window-type').value,
-    descriptorType: document.getElementById('descriptor-type').value,
-    mfccRatio:     +document.getElementById('mfcc-ratio').value / 100,
-    novelty:       +document.getElementById('novelty').value / 100,
-    boredom:       +document.getElementById('boredom').value / 100,
-    stickiness:    +document.getElementById('stickiness').value / 100,
-    ampWeight:     +document.getElementById('amp-weight').value / 100,
+  // ── PREVIEW ──────────────────────────────────────────────────────────────
+
+  function collectParams() {
+    return {
+      brainTrackIndices: Array.from(checked),
+      droppedFiles: droppedFiles.map(f => f.path),
+      blockSizeMs:   +document.getElementById('block-size').value,
+      overlapRatio:  +document.getElementById('overlap').value / 100,
+      windowType:    document.getElementById('window-type').value,
+      descriptorType:document.getElementById('descriptor-type').value,
+      mfccRatio:    +document.getElementById('mfcc-ratio').value / 100,
+      novelty:      +document.getElementById('novelty').value / 100,
+      boredom:      +document.getElementById('boredom').value / 100,
+      stickiness:   +document.getElementById('stickiness').value / 100,
+      ampWeight:    +document.getElementById('amp-weight').value / 100,
+      voices:        +document.getElementById('voices').value,
+    };
+  }
+
+  let previewReqId = 0;
+  let previewAudioBuf = null;
+  let previewSource = null;
+  let audioCtx = null;
+  let isPlaying = false;
+  let previewTimer = null;
+
+  const statusEl = document.getElementById('preview-status');
+  const playBtn  = document.getElementById('btn-play');
+
+  function getAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+
+  function setStatus(html, spinning) {
+    statusEl.innerHTML = (spinning ? '<span class="preview-spinner"></span>' : '') + html;
+  }
+
+  function drawWaveform(audioBuffer) {
+    const canvas = document.getElementById('preview-canvas');
+    const W = canvas.offsetWidth || 544;
+    const H = canvas.offsetHeight || 60;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx2d = canvas.getContext('2d');
+    ctx2d.clearRect(0, 0, W, H);
+    const data = audioBuffer.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / W));
+    const isDark = document.body.classList.contains('dark');
+    ctx2d.strokeStyle = isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.75)';
+    ctx2d.lineWidth = 1;
+    ctx2d.beginPath();
+    for (let x = 0; x < W; x++) {
+      let lo = 1, hi = -1;
+      for (let j = 0; j < step; j++) {
+        const v = data[x * step + j] ?? 0;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      const y1 = ((1 - hi) / 2) * H;
+      const y2 = ((1 - lo) / 2) * H;
+      ctx2d.moveTo(x + 0.5, y1);
+      ctx2d.lineTo(x + 0.5, y2);
+    }
+    ctx2d.stroke();
+    // centre line
+    ctx2d.strokeStyle = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)';
+    ctx2d.beginPath();
+    ctx2d.moveTo(0, H / 2);
+    ctx2d.lineTo(W, H / 2);
+    ctx2d.stroke();
+  }
+
+  async function runPreview() {
+    const myId = ++previewReqId;
+    setStatus('Rendering…', true);
+    playBtn.disabled = true;
+    try {
+      const res = await fetch('/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(collectParams()),
+      });
+      if (myId !== previewReqId) return;
+      if (!res.ok) { setStatus('Error ' + res.status, false); return; }
+      const arrayBuf = await res.arrayBuffer();
+      if (myId !== previewReqId) return;
+      previewAudioBuf = await getAudioCtx().decodeAudioData(arrayBuf);
+      if (myId !== previewReqId) return;
+      drawWaveform(previewAudioBuf);
+      setStatus('Ready · click ▶ to audition', false);
+      playBtn.disabled = false;
+    } catch (e) {
+      if (myId === previewReqId) setStatus('—', false);
+    }
+  }
+
+  function schedulePreview() {
+    if (checked.size + droppedFiles.length === 0) return;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 300);
+  }
+
+  playBtn.addEventListener('click', () => {
+    if (!previewAudioBuf) return;
+    if (isPlaying) {
+      previewSource?.stop();
+      isPlaying = false;
+      playBtn.textContent = '▶';
+      return;
+    }
+    const ac = getAudioCtx();
+    previewSource = ac.createBufferSource();
+    previewSource.buffer = previewAudioBuf;
+    previewSource.connect(ac.destination);
+    previewSource.onended = () => { isPlaying = false; playBtn.textContent = '▶'; };
+    previewSource.start();
+    isPlaying = true;
+    playBtn.textContent = '■';
   });
+
+  // Hook all param changes → schedule preview
+  ['block-size','overlap','amp-weight','novelty','boredom','stickiness','mfcc-ratio','voices']
+    .forEach(id => document.getElementById(id).addEventListener('input', schedulePreview));
+  ['window-type','descriptor-type']
+    .forEach(id => document.getElementById(id).addEventListener('change', schedulePreview));
+
+  document.getElementById('btn-cancel').onclick = () => send({ cancelled: true });
+  document.getElementById('btn-gen').onclick = () => send(Object.assign({ cancelled: false }, collectParams()));
 </script>
 </body>
 </html>

@@ -24,6 +24,7 @@ export interface MatchParams {
   novelty: number;    // 0.0–1.0 — bias against already-used blocks
   boredom: number;    // 0.0–1.0 — decay rate of usage counts
   stickiness: number; // 0.0–1.0 — tendency to follow adjacent blocks
+  voices: number;     // 1–4 — simultaneous brain blocks per target grain
 }
 
 function segmentPcm(pcm: Float64Array, params: BrainParams): Block[] {
@@ -70,58 +71,65 @@ export function synthesize(
 ): Float64Array {
   if (brainBlocks.length === 0 || targetBlocks.length === 0) return new Float64Array(0);
 
-  const { novelty, boredom, stickiness } = matchParams;
+  const { novelty, boredom, stickiness, voices } = matchParams;
+  const numVoices = Math.max(1, Math.min(4, Math.round(voices)));
   const blockSize = brainBlocks[0]!.pcm.length;
   const outputLen = hopSize * targetBlocks.length + blockSize;
   const output = new Float64Array(outputLen);
-  const normSum = new Float64Array(outputLen); // OLA normalisation envelope
+  const normSum = new Float64Array(outputLen);
 
   const win = hannWindow(blockSize);
   const usageCount = new Float64Array(brainBlocks.length);
   let lastIdx = -1;
   let stickyRemaining = 0;
 
-  // Stickiness threshold: distance below which we keep following the sequence
-  // Calibrated so stickiness=1.0 → always stick if neighbour is reasonable
   const stickinessThreshold = 0.5 * stickiness;
 
   for (let t = 0; t < targetBlocks.length; t++) {
     const targetDesc = targetBlocks[t]!.descriptor;
-    let chosenIdx: number;
 
-    // Try stickiness: follow the next block in the brain sequence
+    let primaryIdx: number;
     if (stickyRemaining > 0 && lastIdx >= 0) {
       const nextIdx = (lastIdx + 1) % brainBlocks.length;
       const d = euclidean(targetDesc, brainBlocks[nextIdx]!.descriptor);
       if (d < stickinessThreshold) {
-        chosenIdx = nextIdx;
+        primaryIdx = nextIdx;
         stickyRemaining--;
       } else {
         stickyRemaining = 0;
-        chosenIdx = knnSearch(targetDesc, brainBlocks, usageCount, novelty);
+        primaryIdx = knnSearch(targetDesc, brainBlocks, usageCount, novelty);
         stickyRemaining = Math.round(stickiness * 8);
       }
     } else {
-      chosenIdx = knnSearch(targetDesc, brainBlocks, usageCount, novelty);
+      primaryIdx = knnSearch(targetDesc, brainBlocks, usageCount, novelty);
       stickyRemaining = Math.round(stickiness * 8);
     }
+    lastIdx = primaryIdx;
 
-    lastIdx = chosenIdx;
-
-    // Decay all usage counts by boredom factor
     for (let i = 0; i < usageCount.length; i++) usageCount[i]! *= (1 - boredom * 0.1);
-    usageCount[chosenIdx]! += 1;
 
-    // OLA: write chosen brain block to output with Hann window
-    const brainPcm = brainBlocks[chosenIdx]!.pcm;
-    const outPos = t * hopSize;
-    for (let i = 0; i < blockSize && outPos + i < outputLen; i++) {
-      output[outPos + i]! += brainPcm[i]! * win[i]!;
-      normSum[outPos + i]! += win[i]!;
+    if (numVoices === 1) {
+      usageCount[primaryIdx]! += 1;
+      const brainPcm = brainBlocks[primaryIdx]!.pcm;
+      const outPos = t * hopSize;
+      for (let i = 0; i < blockSize && outPos + i < outputLen; i++) {
+        output[outPos + i]! += brainPcm[i]! * win[i]!;
+        normSum[outPos + i]! += win[i]!;
+      }
+    } else {
+      const topN = knnTopN(targetDesc, brainBlocks, usageCount, novelty, numVoices);
+      const outPos = t * hopSize;
+      for (const { idx, weight } of topN) {
+        usageCount[idx]! += 1;
+        const brainPcm = brainBlocks[idx]!.pcm;
+        for (let i = 0; i < blockSize && outPos + i < outputLen; i++) {
+          output[outPos + i]! += brainPcm[i]! * win[i]! * weight;
+          normSum[outPos + i]! += win[i]! * weight;
+        }
+      }
     }
   }
 
-  // Normalise by OLA envelope
   for (let i = 0; i < outputLen; i++) {
     if (normSum[i]! > 1e-9) output[i]! /= normSum[i]!;
   }
@@ -146,4 +154,23 @@ function knnSearch(
     }
   }
   return bestIdx;
+}
+
+function knnTopN(
+  target: Float64Array,
+  brain: Block[],
+  usageCount: Float64Array,
+  novelty: number,
+  n: number,
+): { idx: number; weight: number }[] {
+  const scored: { idx: number; score: number }[] = [];
+  for (let i = 0; i < brain.length; i++) {
+    const dist = euclidean(target, brain[i]!.descriptor);
+    scored.push({ idx: i, score: dist + novelty * usageCount[i]! });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  const top = scored.slice(0, Math.min(n, scored.length));
+  // Weight by inverse score so the closest match is loudest
+  const invSum = top.reduce((s, x) => s + 1 / (x.score + 1e-9), 0);
+  return top.map(x => ({ idx: x.idx, weight: (1 / (x.score + 1e-9)) / invSum }));
 }
