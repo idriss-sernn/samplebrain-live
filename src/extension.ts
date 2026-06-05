@@ -42,6 +42,16 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
   if (selectedTracks.length === 0) return;
   const targetTrack = selectedTracks[0]!;
 
+  // Capture selection bounds immediately — the ArrangementSelection proxy becomes
+  // stale once showModalDialog suspends the command handler, returning 0 for both values.
+  const selStart = selection.time_selection_start;
+  const selEnd = selection.time_selection_end;
+
+  if (selEnd - selStart < 0.01) {
+    console.error("SampleBrain: selection is empty — drag a time range in the Arrangement View before right-clicking");
+    return;
+  }
+
   // All AudioTracks in the project, as brain source candidates
   const allAudio = song.tracks.filter((t): t is AudioTrack<"1.0.0"> => t instanceof AudioTrack);
 
@@ -56,6 +66,14 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
   };
 
   let pendingPreviewId = 0;
+
+  // PCM cache — renderPreFxAudio is called only once per source change, not on every slider move
+  let cachedTargetPcm: { samples: Float64Array; sampleRate: number } | null = null;
+  let cachedBrainKey = "";
+  let cachedBrainPcms: Float64Array[] = [];
+
+  // Progress state — polled by /preview-progress while a render is in flight
+  const renderProgress = { done: 0, total: 0 };
 
   // Serve the dialog HTML with injected data over a local HTTP server
   const server = http.createServer((req, res) => {
@@ -89,6 +107,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
           res.writeHead(500).end();
         }
       });
+    } else if (req.method === "GET" && reqUrl.pathname === "/preview-progress") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(renderProgress));
     } else if (req.method === "POST" && reqUrl.pathname === "/preview") {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -112,32 +133,58 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     const stale = () => myId !== currentId();
     if (stale()) { res.writeHead(409).end(); return; }
 
-    const selStart = selection.time_selection_start;
-    const selEnd = selection.time_selection_end;
-    if (selEnd - selStart < 0.01) { res.writeHead(400).end(); return; }
+    // selStart/selEnd captured in outer run() scope — always valid
+    if (selEnd - selStart < 0.01) { console.error("SampleBrain preview: selection too short", selStart, selEnd); res.writeHead(400).end(); return; }
 
-    const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
-    if (stale()) { res.writeHead(409).end(); return; }
-    const targetData = await decodeWav(targetWavPath);
-    if (stale()) { res.writeHead(409).end(); return; }
+    // Target PCM — rendered once for the whole dialog session
+    const brainKey = p.brainTrackIndices.join(",") + "|" + p.droppedFiles.join(",");
+    const needsTarget = !cachedTargetPcm;
+    const needsBrain = brainKey !== cachedBrainKey;
 
-    const brainPcms: Float64Array[] = [];
-    for (const idx of p.brainTrackIndices) {
-      if (stale()) { res.writeHead(409).end(); return; }
-      const track = allAudio[idx];
-      if (!track || track.arrangementClips.length === 0) continue;
-      const brainEnd = Math.max(...track.arrangementClips.map((c) => c.endTime));
-      const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
-      if (stale()) { res.writeHead(409).end(); return; }
-      const brainData = await decodeWav(brainWavPath);
-      brainPcms.push(brainData.samples);
-    }
-    for (const filePath of p.droppedFiles) {
-      if (stale()) { res.writeHead(409).end(); return; }
-      try { brainPcms.push((await decodeWav(filePath)).samples); } catch { /* skip */ }
+    if (needsTarget || needsBrain) {
+      // Count items that will actually be rendered to show accurate progress
+      const tracksWithClips = needsBrain
+        ? p.brainTrackIndices.map(i => allAudio[i]).filter(t => t && t.arrangementClips.length > 0)
+        : [];
+      renderProgress.done = 0;
+      renderProgress.total = (needsTarget ? 1 : 0) + tracksWithClips.length + (needsBrain ? p.droppedFiles.length : 0);
+    } else {
+      renderProgress.done = 0; renderProgress.total = 0;
     }
 
-    if (brainPcms.length === 0) { res.writeHead(400).end(); return; }
+    if (needsTarget) {
+      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
+      if (stale()) { res.writeHead(409).end(); return; }
+      const decoded = await decodeWav(targetWavPath);
+      if (stale()) { res.writeHead(409).end(); return; }
+      cachedTargetPcm = decoded;
+      renderProgress.done++;
+    }
+    const targetData = cachedTargetPcm!;
+
+    // Brain PCMs — re-rendered only when the source selection changes, not on slider moves
+    if (needsBrain) {
+      const newPcms: Float64Array[] = [];
+      for (const idx of p.brainTrackIndices) {
+        if (stale()) { res.writeHead(409).end(); return; }
+        const track = allAudio[idx];
+        if (!track || track.arrangementClips.length === 0) continue;
+        const brainEnd = Math.max(...track.arrangementClips.map((c) => c.endTime));
+        const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
+        if (stale()) { res.writeHead(409).end(); return; }
+        const brainData = await decodeWav(brainWavPath);
+        newPcms.push(brainData.samples);
+        renderProgress.done++;
+      }
+      for (const filePath of p.droppedFiles) {
+        if (stale()) { res.writeHead(409).end(); return; }
+        try { newPcms.push((await decodeWav(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
+      }
+      if (!stale()) { cachedBrainKey = brainKey; cachedBrainPcms = newPcms; }
+    }
+    const brainPcms = cachedBrainPcms;
+
+    if (brainPcms.length === 0) { console.error("SampleBrain preview: all brain sources empty"); res.writeHead(400).end(); return; }
     if (stale()) { res.writeHead(409).end(); return; }
 
     const { sampleRate } = targetData;
@@ -152,7 +199,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     };
     const brainBlocks = buildBrain(brainPcms, brainParams);
     const targetBlocks = buildTarget(targetData.samples, brainParams);
-    if (brainBlocks.length === 0 || targetBlocks.length === 0) { res.writeHead(400).end(); return; }
+    if (brainBlocks.length === 0 || targetBlocks.length === 0) { console.error("SampleBrain preview: 0 blocks — blockSize too large?", brainBlocks.length, targetBlocks.length); res.writeHead(400).end(); return; }
     if (stale()) { res.writeHead(409).end(); return; }
 
     const hopSize = Math.max(1, Math.round(blockSizeSamples * (1 - p.overlapRatio)));
@@ -170,7 +217,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
 
   let rawResult: string;
   try {
-    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 880);
+    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 720);
   } finally {
     server.closeAllConnections?.();
     server.close();
@@ -180,6 +227,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
   try {
     params = JSON.parse(rawResult) as DialogResult;
   } catch {
+    console.error("SampleBrain: failed to parse dialog result:", rawResult);
     return;
   }
   if (params.cancelled) return;
@@ -188,22 +236,19 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     .map((i) => allAudio[i])
     .filter((t): t is AudioTrack<"1.0.0"> => t !== undefined);
 
-  if (brainTracks.length === 0) return;
+  if (brainTracks.length === 0 && params.droppedFiles.length === 0) {
+    console.error("SampleBrain: no brain sources selected");
+    return;
+  }
 
   await ctx.ui.withinProgressDialog("SampleBrain", {}, async (update, signal) => {
     try {
       const tempo = song.tempo;
       const secPerBeat = 60 / tempo;
-      const selStart = selection.time_selection_start;
-      const selEnd = selection.time_selection_end;
-
-      if (selEnd - selStart < 0.01) {
-        console.error("SampleBrain: selection is empty — drag a time range in the Arrangement View before right-clicking");
-        return;
-      }
+      // selStart/selEnd captured in outer run() scope (before showModalDialog) — proxy is stale here
 
       // --- Render target ---
-      update("Rendering target…", 5);
+      update(`Rendering target… (${selStart.toFixed(2)}–${selEnd.toFixed(2)} beats)`, 5);
       const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
       if (signal.aborted) return;
       const targetData = await decodeWav(targetWavPath);

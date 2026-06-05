@@ -833,6 +833,19 @@ Click ▶ to audition before committing.">?</span>
     const myId = ++previewReqId;
     setStatus('Rendering…', true);
     playBtn.disabled = true;
+
+    let pollTimer = setInterval(async () => {
+      if (myId !== previewReqId) { clearInterval(pollTimer); return; }
+      try {
+        const r = await fetch('/preview-progress');
+        if (!r.ok || myId !== previewReqId) return;
+        const prog = await r.json();
+        if (prog.total > 0 && prog.done < prog.total) {
+          setStatus('Rendering ' + prog.done + '/' + prog.total + ' tracks…', true);
+        }
+      } catch {}
+    }, 400);
+
     try {
       const res = await fetch('/preview', {
         method: 'POST',
@@ -850,6 +863,8 @@ Click ▶ to audition before committing.">?</span>
       playBtn.disabled = false;
     } catch (e) {
       if (myId === previewReqId) setStatus('—', false);
+    } finally {
+      clearInterval(pollTimer);
     }
   }
 
