@@ -157,7 +157,7 @@ function decodeAiff(buf: Buffer): WavData {
 
 // ─── Encode WAV (always RIFF float32, little-endian) ────────────────────────
 
-export function encodeWav(samples: Float64Array, sampleRate: number): Buffer {
+export function encodeWav(samples: Float64Array, sampleRate: number, ampWeight = 1.0): Buffer {
   const bitsPerSample = 32;
   const numChannels = 1;
   const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
@@ -184,7 +184,7 @@ export function encodeWav(samples: Float64Array, sampleRate: number): Buffer {
     const v = Math.abs(samples[i]!);
     if (v > peak) peak = v;
   }
-  const gain = peak > 1e-9 ? 0.99 / peak : 1;
+  const gain = (peak > 1e-9 ? 0.99 / peak : 1) * Math.max(0.01, Math.min(1, ampWeight));
 
   for (let i = 0; i < samples.length; i++) {
     buf.writeFloatLE(samples[i]! * gain, 44 + i * 4);

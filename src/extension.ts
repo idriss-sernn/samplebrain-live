@@ -70,6 +70,23 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       const url = reqUrl.searchParams.get("url") ?? "";
       if (url.startsWith("https://")) execFile("open", [url]);
       res.writeHead(204).end();
+    } else if (req.method === "POST" && reqUrl.pathname === "/upload-file") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", async () => {
+        try {
+          const buf = Buffer.concat(chunks);
+          const filename = (req.headers["x-filename"] as string) ?? "sample.wav";
+          const ext = path.extname(filename) || ".wav";
+          const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
+          const outPath = path.join(tmpDir, `sb_drop_${Date.now()}${ext}`);
+          await fs.writeFile(outPath, buf);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, path: outPath }));
+        } catch {
+          res.writeHead(500).end();
+        }
+      });
     } else {
       res.writeHead(404).end();
     }
@@ -131,7 +148,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       for (let i = 0; i < brainTracks.length; i++) {
         if (signal.aborted) return;
         const track = brainTracks[i]!;
-        const progressBase = 10 + i * (35 / brainTracks.length);
+        const progressBase = 10 + i * (30 / brainTracks.length);
         update(`Rendering brain: ${track.name} (${i + 1}/${brainTracks.length})…`, progressBase);
 
         const clips = track.arrangementClips;
@@ -144,6 +161,19 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         if (signal.aborted) return;
         const brainData = await decodeWav(brainWavPath);
         brainPcms.push(brainData.samples);
+      }
+
+      // --- Decode dropped files ---
+      for (let i = 0; i < params.droppedFiles.length; i++) {
+        if (signal.aborted) return;
+        const filePath = params.droppedFiles[i]!;
+        update(`Loading file ${i + 1}/${params.droppedFiles.length}…`, 40 + i * (8 / Math.max(1, params.droppedFiles.length)));
+        try {
+          const brainData = await decodeWav(filePath);
+          brainPcms.push(brainData.samples);
+        } catch (err) {
+          console.warn(`SampleBrain: skipping dropped file "${filePath}": ${err}`);
+        }
       }
 
       if (brainPcms.length === 0) {
@@ -201,7 +231,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       // --- Write WAV ---
       update("Writing output…", 85);
       if (signal.aborted) return;
-      const wavBuf = encodeWav(output, sampleRate);
+      const wavBuf = encodeWav(output, sampleRate, params.ampWeight);
       const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
       const outPath = path.join(tmpDir, `samplebrain_${Date.now()}.wav`);
       await fs.writeFile(outPath, wavBuf);
@@ -238,6 +268,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
 interface DialogResult {
   cancelled: boolean;
   brainTrackIndices: number[];
+  droppedFiles: string[];
   blockSizeMs: number;
   overlapRatio: number;
   windowType: string;
@@ -246,4 +277,5 @@ interface DialogResult {
   novelty: number;
   boredom: number;
   stickiness: number;
+  ampWeight: number;
 }

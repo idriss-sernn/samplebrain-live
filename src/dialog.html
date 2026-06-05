@@ -81,6 +81,26 @@
     transition: background .12s, color .12s;
   }
   .help:hover { background: var(--full); color: var(--white); border-color: var(--full); }
+  /* ── ACTIVE FEEDBACK ── */
+  .pgrid .param { transition: background .15s; }
+  .pgrid .param:focus-within { background: rgba(0,0,0,0.04); }
+  .pgrid .param:focus-within .lbl { color: var(--full); }
+  .netcell { transition: background .15s; }
+  .netcell:focus-within { background: rgba(0,0,0,0.03); }
+  .netcell:focus-within .lbl { color: var(--full); }
+  body.dark .pgrid .param:focus-within { background: rgba(255,255,255,0.06); }
+  body.dark .netcell:focus-within { background: rgba(255,255,255,0.04); }
+
+  /* ── VALUE POP ── */
+  @keyframes val-pop {
+    0%   { transform: scale(1); }
+    35%  { transform: scale(1.22); color: var(--full); }
+    100% { transform: scale(1); }
+  }
+  .val-popping { display: inline-block; animation: val-pop .2s ease-out; }
+
+  /* ── RANDOMIZE BUTTON ── */
+  .btn-rnd { padding: 6px 10px; font-size: 15px; letter-spacing: 0; line-height: 1; }
 
   /* ── TOOLTIP ── */
   .help::after {
@@ -132,12 +152,37 @@
   .t-row.on .t-name { color: var(--full); font-weight: 600; }
   .no-tracks { font-size: 10px; color: var(--dim); font-style: italic; }
 
+  /* ── DROP ZONE ── */
+  .drop-zone {
+    margin-top: 7px;
+    border: 1px dashed var(--line);
+    padding: 7px 10px;
+    text-align: center;
+    font-size: 9px; letter-spacing: .10em; text-transform: uppercase;
+    color: var(--dim); cursor: default;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .drop-zone.over { background: var(--full); color: var(--white); border-color: var(--full); }
+  .drop-files-list { margin-top: 4px; }
+  .drop-file {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; border-bottom: 1px solid var(--line2);
+    font-size: 9px; color: var(--mid);
+  }
+  .drop-file:last-child { border-bottom: none; }
+  .drop-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drop-file-rm {
+    font-size: 9px; color: var(--dim); cursor: pointer; padding: 0 2px; flex-shrink: 0;
+  }
+  .drop-file-rm:hover { color: var(--full); }
+
   /* ── PARAM GRID ── */
   .pgrid { display: grid; grid-template-columns: 1fr 1fr; }
   .pgrid .param {
     padding: 9px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
   }
   .pgrid .param:nth-child(even) { border-right: none; }
+  .pgrid .param-full { grid-column: span 2; }
   .param-full { padding: 9px 16px; border-bottom: 1px solid var(--line); }
 
   /* ── SLIDER (LED segments, dark on white) ── */
@@ -272,6 +317,8 @@
       <span class="help tip-down" data-tip="Audio tracks providing the raw material. The output is built exclusively from grains taken from these tracks.">?</span>
     </div>
     <div id="track-list"></div>
+    <div class="drop-zone" id="drop-zone">Drop WAV / AIFF from Finder</div>
+    <div class="drop-files-list" id="drop-files-list"></div>
   </div>
 
   <div class="pgrid">
@@ -326,6 +373,18 @@ Mix = blend of both.">?</span>
         <option value="fft">FFT</option>
         <option value="mix">Mix</option>
       </select>
+    </div>
+    <div class="param-full">
+      <div class="lbl-row">
+        <span class="lbl">Output</span>
+        <span class="help" data-tip="Output level after peak normalization.
+100% = normalized to peak (standard).
+Lower = leaves headroom before clipping.">?</span>
+      </div>
+      <div class="sl-row">
+        <input type="range" id="amp-weight" min="10" max="100" step="5" value="100">
+        <span class="sl-val"><span id="aw-v">100</span>%</span>
+      </div>
     </div>
   </div>
 
@@ -386,6 +445,7 @@ Lower = more random jumps in the brain.">?</span>
 <div class="ft">
   <div class="ft-info" id="ft-info">Select brain sources</div>
   <button class="btn" id="btn-cancel">Cancel</button>
+  <button class="btn btn-rnd" id="rnd-btn" title="Randomize all parameters">↺</button>
   <button class="btn btn-gen" id="btn-gen" disabled>Generate &#9654;</button>
 </div>
 <div style="text-align:center;padding:5px 16px 7px;border-top:1px solid var(--line2);font-size:8px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)">Made by <span id="sernn-link" style="color:var(--full);font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:1px">Sernn</span></div>
@@ -398,6 +458,7 @@ Lower = more random jumps in the brain.">?</span>
   document.getElementById('target-name').textContent = init.targetName;
 
   const checked = new Set();
+  const droppedFiles = [];
   const list = document.getElementById('track-list');
 
   if (!init.availableTracks.length) {
@@ -419,8 +480,59 @@ Lower = more random jumps in the brain.">?</span>
     });
   }
 
+  function renderDropFiles() {
+    const container = document.getElementById('drop-files-list');
+    container.innerHTML = '';
+    droppedFiles.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'drop-file';
+      const name = document.createElement('span');
+      name.className = 'drop-file-name';
+      name.textContent = f.name;
+      const rm = document.createElement('span');
+      rm.className = 'drop-file-rm';
+      rm.textContent = '✕';
+      rm.addEventListener('click', () => {
+        droppedFiles.splice(i, 1);
+        renderDropFiles();
+        updateFooter();
+      });
+      row.appendChild(name);
+      row.appendChild(rm);
+      container.appendChild(row);
+    });
+  }
+
+  const dropZone = document.getElementById('drop-zone');
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+  dropZone.addEventListener('drop', async e => {
+    e.preventDefault();
+    dropZone.classList.remove('over');
+    for (const file of Array.from(e.dataTransfer.files)) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (!['wav', 'aif', 'aiff'].includes(ext)) continue;
+      let filePath = file.path;
+      if (!filePath) {
+        try {
+          const buf = await file.arrayBuffer();
+          const res = await fetch('/upload-file', {
+            method: 'POST', body: buf,
+            headers: { 'X-Filename': file.name }
+          });
+          const json = await res.json();
+          filePath = json.path;
+        } catch (_) { continue; }
+      }
+      if (filePath && !droppedFiles.some(f => f.path === filePath))
+        droppedFiles.push({ path: filePath, name: file.name });
+    }
+    renderDropFiles();
+    updateFooter();
+  });
+
   function updateFooter() {
-    const n = checked.size;
+    const n = checked.size + droppedFiles.length;
     document.getElementById('btn-gen').disabled = n === 0;
     document.getElementById('ft-info').innerHTML =
       n === 0 ? 'Select brain sources'
@@ -446,19 +558,25 @@ Lower = more random jumps in the brain.">?</span>
     const el = document.getElementById(id);
     const vEl = document.getElementById(valId);
     allSliders.push({ el, vEl, fmt });
-    const paint = () => {
+    const paint = (animate) => {
       vEl.textContent = fmt(+el.value);
       const [fill, empty] = sliderColors();
       const pct = ((+el.value - +el.min) / (+el.max - +el.min) * 100).toFixed(1);
       el.style.background = 'linear-gradient(to right,' + fill + ' ' + pct + '%,' + empty + ' ' + pct + '%)';
+      if (animate) {
+        vEl.classList.remove('val-popping');
+        void vEl.offsetWidth;
+        vEl.classList.add('val-popping');
+      }
     };
-    el.addEventListener('input', paint);
-    paint();
+    el.addEventListener('input', () => paint(true));
+    paint(false);
   }
 
   bind('block-size', 'bs-v', v => v);
   bind('overlap',    'ov-v', v => v);
   bind('mfcc-ratio', 'mr-v', v => v);
+  bind('amp-weight', 'aw-v', v => v);
   bind('novelty',    'nv-v', v => (v/100).toFixed(2));
   bind('boredom',    'bd-v', v => (v/100).toFixed(2));
   bind('stickiness', 'sk-v', v => (v/100).toFixed(2));
@@ -491,10 +609,27 @@ Lower = more random jumps in the brain.">?</span>
     paintAllSliders();
   };
 
+  document.getElementById('rnd-btn').addEventListener('click', () => {
+    ['block-size', 'overlap', 'amp-weight', 'novelty', 'boredom', 'stickiness'].forEach(id => {
+      const el = document.getElementById(id);
+      const min = +el.min, max = +el.max, step = +el.step || 5;
+      const steps = Math.floor((max - min) / step);
+      el.value = min + Math.floor(Math.random() * (steps + 1)) * step;
+      el.dispatchEvent(new Event('input'));
+    });
+    const windowOpts = ['hann', 'hamming', 'triangle', 'rectangle'];
+    document.getElementById('window-type').value = windowOpts[Math.floor(Math.random() * windowOpts.length)];
+    const descOpts = ['mfcc', 'fft', 'mix'];
+    const descEl = document.getElementById('descriptor-type');
+    descEl.value = descOpts[Math.floor(Math.random() * descOpts.length)];
+    descEl.dispatchEvent(new Event('change'));
+  });
+
   document.getElementById('btn-cancel').onclick = () => send({ cancelled: true });
   document.getElementById('btn-gen').onclick = () => send({
     cancelled: false,
     brainTrackIndices: Array.from(checked),
+    droppedFiles: droppedFiles.map(f => f.path),
     blockSizeMs:   +document.getElementById('block-size').value,
     overlapRatio:  +document.getElementById('overlap').value / 100,
     windowType:     document.getElementById('window-type').value,
@@ -503,6 +638,7 @@ Lower = more random jumps in the brain.">?</span>
     novelty:       +document.getElementById('novelty').value / 100,
     boredom:       +document.getElementById('boredom').value / 100,
     stickiness:    +document.getElementById('stickiness').value / 100,
+    ampWeight:     +document.getElementById('amp-weight').value / 100,
   });
 </script>
 </body>
