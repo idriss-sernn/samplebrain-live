@@ -620,26 +620,7 @@ Click ▶ to audition before committing.">?</span>
   dropZone.addEventListener('drop', async e => {
     e.preventDefault();
     dropZone.classList.remove('over');
-    for (const file of Array.from(e.dataTransfer.files)) {
-      const ext = file.name.split('.').pop().toLowerCase();
-      if (!['wav', 'aif', 'aiff'].includes(ext)) continue;
-      let filePath = file.path;
-      if (!filePath) {
-        try {
-          const buf = await file.arrayBuffer();
-          const res = await fetch('/upload-file', {
-            method: 'POST', body: buf,
-            headers: { 'X-Filename': file.name }
-          });
-          const json = await res.json();
-          filePath = json.path;
-        } catch (_) { continue; }
-      }
-      if (filePath && !droppedFiles.some(f => f.path === filePath))
-        droppedFiles.push({ path: filePath, name: file.name });
-    }
-    renderDropFiles();
-    updateFooter();
+    setStatus('File drop is unavailable in the installed build. Use brain tracks.', false);
   });
 
   function updateFooter() {
@@ -649,10 +630,11 @@ Click ▶ to audition before committing.">?</span>
       n === 0 ? 'Select brain sources'
               : '<span>' + n + '</span> source' + (n > 1 ? 's' : '') + ' &middot; ready';
     if (n === 0) {
-      setStatus('Select brain sources to preview', false);
+      setStatus('Select brain sources', false);
       document.getElementById('btn-play').disabled = true;
     } else {
-      schedulePreview();
+      setStatus('Ready to generate', false);
+      document.getElementById('btn-play').disabled = true;
     }
   }
 
@@ -832,46 +814,16 @@ Click ▶ to audition before committing.">?</span>
   }
 
   async function runPreview() {
-    const myId = ++previewReqId;
-    setStatus('Rendering…', true);
+    ++previewReqId;
+    setStatus('Preview is unavailable in the installed build', false);
     playBtn.disabled = true;
-
-    let pollTimer = setInterval(async () => {
-      if (myId !== previewReqId) { clearInterval(pollTimer); return; }
-      try {
-        const r = await fetch('/preview-progress');
-        if (!r.ok || myId !== previewReqId) return;
-        const prog = await r.json();
-        if (prog.total > 0 && prog.done < prog.total) {
-          setStatus('Rendering ' + prog.done + '/' + prog.total + ' tracks…', true);
-        }
-      } catch {}
-    }, 400);
-
-    try {
-      const res = await fetch('/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(collectParams()),
-      });
-      if (myId !== previewReqId) return;
-      if (!res.ok) { setStatus('Error ' + res.status, false); return; }
-      const arrayBuf = await res.arrayBuffer();
-      if (myId !== previewReqId) return;
-      previewAudioBuf = await getAudioCtx().decodeAudioData(arrayBuf);
-      if (myId !== previewReqId) return;
-      drawWaveform(previewAudioBuf);
-      setStatus('Ready · click ▶ to audition', false);
-      playBtn.disabled = false;
-    } catch (e) {
-      if (myId === previewReqId) setStatus('—', false);
-    } finally {
-      clearInterval(pollTimer);
-    }
   }
 
   function schedulePreview() {
-    if (checked.size + droppedFiles.length === 0) return;
+    if (checked.size + droppedFiles.length === 0) {
+      setStatus('Select brain sources', false);
+      return;
+    }
     clearTimeout(previewTimer);
     previewTimer = setTimeout(runPreview, 300);
   }

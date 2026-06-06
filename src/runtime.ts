@@ -1,9 +1,6 @@
-import * as http from "node:http";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as net from "node:net";
 import * as os from "node:os";
-import { URL } from "node:url";
 import {
   initialize,
   AudioClip,
@@ -107,158 +104,15 @@ export async function run(ctx: Ctx, arg: unknown): Promise<void> {
       .filter(({ index }) => index !== targetAudioIdx),
   };
 
-  let pendingPreviewId = 0;
-
-  // PCM cache — renderPreFxAudio is called only once per source change, not on every slider move
-  let cachedTargetPcm: { samples: Float64Array; sampleRate: number } | null = null;
-  let cachedBrainKey = "";
-  let cachedBrainPcms: Float64Array[] = [];
-
-  // Progress state — polled by /preview-progress while a render is in flight
-  const renderProgress = { done: 0, total: 0 };
-
-  // Serve the dialog HTML with injected data over a local HTTP server
-  const server = http.createServer((req, res) => {
-    const reqUrl = new URL(req.url ?? "/", `http://127.0.0.1`);
-
-    if (req.method === "GET" && reqUrl.pathname === "/") {
-      const page = dialogHtml.replace(
-        "</head>",
-        `<script>window.__SB_INIT__ = ${JSON.stringify(initData)};</script></head>`,
-      );
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(page);
-    } else if (req.method === "POST" && reqUrl.pathname === "/upload-file") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", async () => {
-        try {
-          const buf = Buffer.concat(chunks);
-          const filename = (req.headers["x-filename"] as string) ?? "sample.wav";
-          const ext = path.extname(filename) || ".wav";
-          const outPath = path.join(tempDir, `sb_drop_${Date.now()}${ext}`);
-          await fs.writeFile(outPath, buf);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true, path: outPath }));
-        } catch {
-          res.writeHead(500).end();
-        }
-      });
-    } else if (req.method === "GET" && reqUrl.pathname === "/preview-progress") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(renderProgress));
-    } else if (req.method === "POST" && reqUrl.pathname === "/preview") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => void runPreview(
-        ++pendingPreviewId,
-        () => pendingPreviewId,
-        JSON.parse(Buffer.concat(chunks).toString()) as PreviewRequest,
-        res,
-      ).catch((err) => { if (!res.writableEnded) res.writeHead(500).end(String(err)); }));
-    } else {
-      res.writeHead(404).end();
-    }
-  });
-
-  async function runPreview(
-    myId: number,
-    currentId: () => number,
-    p: PreviewRequest,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    const stale = () => myId !== currentId();
-    if (stale()) { res.writeHead(409).end(); return; }
-
-    // selStart/selEnd captured in outer run() scope — always valid
-    if (selEnd - selStart < 0.01) { console.error("SampleBrain preview: selection too short", selStart, selEnd); res.writeHead(400).end(); return; }
-
-    // Target PCM — rendered once for the whole dialog session
-    const brainKey = p.brainTrackIndices.join(",") + "|" + p.droppedFiles.join(",");
-    const needsTarget = !cachedTargetPcm;
-    const needsBrain = brainKey !== cachedBrainKey;
-
-    if (needsTarget || needsBrain) {
-      // Count items that will actually be rendered to show accurate progress
-      const tracksWithClips = needsBrain
-        ? p.brainTrackIndices.map(i => allAudio[i]).filter(t => t && t.arrangementClips.length > 0)
-        : [];
-      renderProgress.done = 0;
-      renderProgress.total = (needsTarget ? 1 : 0) + tracksWithClips.length + (needsBrain ? p.droppedFiles.length : 0);
-    } else {
-      renderProgress.done = 0; renderProgress.total = 0;
-    }
-
-    if (needsTarget) {
-      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
-      if (stale()) { res.writeHead(409).end(); return; }
-      const decoded = await decodeWav(targetWavPath);
-      if (stale()) { res.writeHead(409).end(); return; }
-      cachedTargetPcm = decoded;
-      renderProgress.done++;
-    }
-    const targetData = cachedTargetPcm!;
-
-    // Brain PCMs — re-rendered only when the source selection changes, not on slider moves
-    if (needsBrain) {
-      const newPcms: Float64Array[] = [];
-      for (const idx of p.brainTrackIndices) {
-        if (stale()) { res.writeHead(409).end(); return; }
-        const track = allAudio[idx];
-        if (!track || track.arrangementClips.length === 0) continue;
-        const brainEnd = Math.max(...track.arrangementClips.map((c) => c.endTime));
-        const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
-        if (stale()) { res.writeHead(409).end(); return; }
-        const brainData = await decodeWav(brainWavPath);
-        newPcms.push(brainData.samples);
-        renderProgress.done++;
-      }
-      for (const filePath of p.droppedFiles) {
-        if (stale()) { res.writeHead(409).end(); return; }
-        try { newPcms.push((await decodeWav(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
-      }
-      if (!stale()) { cachedBrainKey = brainKey; cachedBrainPcms = newPcms; }
-    }
-    const brainPcms = cachedBrainPcms;
-
-    if (brainPcms.length === 0) { console.error("SampleBrain preview: all brain sources empty"); res.writeHead(400).end(); return; }
-    if (stale()) { res.writeHead(409).end(); return; }
-
-    const { sampleRate } = targetData;
-    const blockSizeSamples = Math.max(64, Math.round((p.blockSizeMs / 1000) * sampleRate));
-    const brainParams: BrainParams = {
-      blockSizeSamples,
-      overlapRatio: p.overlapRatio,
-      windowType: p.windowType as BrainParams["windowType"],
-      descriptorType: p.descriptorType as BrainParams["descriptorType"],
-      mfccRatio: p.mfccRatio,
-      sampleRate,
-    };
-    const brainBlocks = buildBrain(brainPcms, brainParams);
-    const targetBlocks = buildTarget(targetData.samples, brainParams);
-    if (brainBlocks.length === 0 || targetBlocks.length === 0) { console.error("SampleBrain preview: 0 blocks — blockSize too large?", brainBlocks.length, targetBlocks.length); res.writeHead(400).end(); return; }
-    if (stale()) { res.writeHead(409).end(); return; }
-
-    const hopSize = Math.max(1, Math.round(blockSizeSamples * (1 - p.overlapRatio)));
-    const matchParams: MatchParams = { novelty: p.novelty, boredom: p.boredom, stickiness: p.stickiness, voices: p.voices, pitchShift: p.pitchShift, pitchShiftVar: p.pitchShiftVar, reverse: p.reverse, density: p.density };
-    const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
-    const wavBuf = encodeWav(output, sampleRate, p.ampWeight);
-
-    if (stale()) { res.writeHead(409).end(); return; }
-    res.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": String(wavBuf.length) });
-    res.end(wavBuf);
-  }
-
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  const { port } = server.address() as net.AddressInfo;
-
-  let rawResult: string;
-  try {
-    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 780);
-  } finally {
-    server.closeAllConnections?.();
-    server.close();
-  }
+  const page = dialogHtml.replace(
+    "</head>",
+    `<script>window.__SB_INIT__ = ${JSON.stringify(initData)};</script></head>`,
+  );
+  const rawResult = await ctx.ui.showModalDialog(
+    `data:text/html,${encodeURIComponent(page)}`,
+    576,
+    780,
+  );
 
   let params: DialogResult;
   try {
@@ -426,25 +280,6 @@ export async function run(ctx: Ctx, arg: unknown): Promise<void> {
 
 interface DialogResult {
   cancelled: boolean;
-  brainTrackIndices: number[];
-  droppedFiles: string[];
-  blockSizeMs: number;
-  overlapRatio: number;
-  windowType: string;
-  descriptorType: string;
-  mfccRatio: number;
-  novelty: number;
-  boredom: number;
-  stickiness: number;
-  ampWeight: number;
-  voices: number;
-  pitchShift: number;
-  pitchShiftVar: number;
-  reverse: number;
-  density: number;
-}
-
-interface PreviewRequest {
   brainTrackIndices: number[];
   droppedFiles: string[];
   blockSizeMs: number;

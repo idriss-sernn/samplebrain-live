@@ -16,6 +16,14 @@ test("extension never falls back to Unix-only temp paths", async () => {
   assert.match(source, /os\.tmpdir\(\)/);
 });
 
+test("installed runtime does not require a loopback HTTP server", async () => {
+  const runtime = await readFile(new URL("./runtime.ts", import.meta.url), "utf8");
+  const dialog = await readFile(new URL("./dialog.html", import.meta.url), "utf8");
+
+  assert.doesNotMatch(runtime, /node:http|createServer|127\.0\.0\.1|ServerResponse/);
+  assert.doesNotMatch(dialog, /\/preview|\/upload-file/);
+});
+
 test("context menu titles are explicit for installed Live Beta menus", async () => {
   const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
 
