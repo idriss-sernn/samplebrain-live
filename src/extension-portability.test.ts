@@ -35,7 +35,18 @@ test("production entry stays as a lightweight activation shim", async () => {
   const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /node:http|node:fs\/promises|node:net|\.\/dialog\.html|\.\/brain\.js|\.\/wav\.js/);
-  assert.match(source, /import\("\.\/runtime\.js"\)/);
+  assert.match(source, /import\(runtimeModulePath\)/);
+});
+
+test("packaging includes the split runtime bundle", async () => {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ) as { scripts?: Record<string, string> };
+  const buildScript = await readFile(new URL("../build.ts", import.meta.url), "utf8");
+
+  assert.match(buildScript, /src\/runtime\.ts/);
+  assert.match(buildScript, /dist\/runtime\.cjs/);
+  assert.match(packageJson.scripts?.package ?? "", /-i dist\/runtime\.cjs/);
 });
 
 test("package exposes a separate typecheck gate", async () => {
