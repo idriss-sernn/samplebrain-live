@@ -32,8 +32,7 @@ Target (spectral shape) + Brain (sound material) → new audio clip
 4. Make sure **Developer Mode is OFF** in Live's preferences
 5. Right-click any audio track arrangement selection → **SampleBrain…**
 
-> **Windows users:** extensions also require **Windows Developer Mode** to be enabled at the OS level.
-> Go to **Settings → Privacy & Security → For developers → Developer Mode → On**, then restart Live.
+> **Note:** if the extension doesn't appear after install, try disabling other extensions temporarily — Live 12 Beta has a known bug where loading many extensions at once can break the catalog.
 
 ---
 
