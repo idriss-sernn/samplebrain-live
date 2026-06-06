@@ -38,3 +38,11 @@ test("package exposes a separate typecheck gate", async () => {
 
   assert.equal(packageJson.scripts?.typecheck, "tsc --noEmit");
 });
+
+test("manifest declares production permissions for filesystem and loopback UI", async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL("../manifest.json", import.meta.url), "utf8"),
+  ) as { permissions?: string[] };
+
+  assert.deepEqual(manifest.permissions?.sort(), ["filesystem", "network"]);
+});
