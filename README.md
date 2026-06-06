@@ -4,8 +4,8 @@
 
 **Made by [Sernn](https://linktr.ee/sernn)**
 
-![SampleBrain UI light](docs/screenshots/ui-light.png?v=1.1)
-![SampleBrain UI dark](docs/screenshots/ui-dark.png?v=1.1)
+![SampleBrain UI light](docs/screenshots/ui-light-v11.png)
+![SampleBrain UI dark](docs/screenshots/ui-dark-v11.png)
 
 ---
 
