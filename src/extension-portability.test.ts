@@ -10,7 +10,7 @@ test("extension does not spawn platform-specific system URL openers", async () =
 });
 
 test("extension never falls back to Unix-only temp paths", async () => {
-  const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
+  const source = await readFile(new URL("./runtime.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /\/tmp/);
   assert.match(source, /os\.tmpdir\(\)/);
@@ -29,6 +29,13 @@ test("extension is visible from ordinary audio clip context menus", async () => 
 
   assert.match(source, /registerContextMenuAction\(\s*"AudioClip"/);
   assert.match(source, /"Process Clip…"/);
+});
+
+test("production entry stays as a lightweight activation shim", async () => {
+  const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /node:http|node:fs\/promises|node:net|\.\/dialog\.html|\.\/brain\.js|\.\/wav\.js/);
+  assert.match(source, /import\("\.\/runtime\.js"\)/);
 });
 
 test("package exposes a separate typecheck gate", async () => {
