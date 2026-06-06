@@ -23,14 +23,17 @@ Target (spectral shape) + Brain (sound material) → new audio clip
 
 > Requires **Ableton Live 12 Beta**, Suite edition.
 
-1. Download `SampleBrain-1.0.0.ablx` from [Releases](../../releases)
+1. Download `SampleBrain-1.1.0.ablx` from [Releases](../../releases)
 2. In Live: **Preferences → Extensions**
 3. Drag & drop the `.ablx` file onto the panel
 
 ![Install screenshot](docs/screenshots/install.png)
 
-4. Make sure **Developer Mode is OFF**
+4. Make sure **Developer Mode is OFF** in Live's preferences
 5. Right-click any audio track arrangement selection → **SampleBrain…**
+
+> **Windows users:** extensions also require **Windows Developer Mode** to be enabled at the OS level.
+> Go to **Settings → Privacy & Security → For developers → Developer Mode → On**, then restart Live.
 
 ---
 
