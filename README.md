@@ -23,14 +23,14 @@ Target (spectral shape) + Brain (sound material) → new audio clip
 
 > Requires **Ableton Live 12 Beta**, Suite edition.
 
-1. Download `SampleBrain-1.0.0.ablx` from [Releases](../../releases)
+1. Download `SampleBrain-1.1.1.ablx` from [Releases](../../releases)
 2. In Live: **Preferences → Extensions**
 3. Drag & drop the `.ablx` file onto the panel
 
 ![Install screenshot](docs/screenshots/install.png)
 
 4. Make sure **Developer Mode is OFF**
-5. Right-click any audio track arrangement selection → **SampleBrain…**
+5. Right-click an audio clip → **SampleBrain: Process Clip…**
 
 ---
 
@@ -40,7 +40,7 @@ Target (spectral shape) + Brain (sound material) → new audio clip
 
 ![Step 1 — Select a time range](docs/screenshots/step1-selection.png)
 
-**Step 2 — Right-click → Extensions → SampleBrain…**
+**Step 2 — Right-click the target audio clip → Extensions → SampleBrain: Process Clip…**
 
 ![Step 2 — Context menu](docs/screenshots/step2-context-menu.png)
 
@@ -113,6 +113,9 @@ npm install
 Create a `.env` file at the root of the project:
 
 ```bash
+# Windows / Live 12 Beta
+EXTENSION_HOST_PATH=C:\ProgramData\Ableton\Live 12 Beta\Program\ExtensionHost\ExtensionHostNodeModule.node
+
 # macOS
 EXTENSION_HOST_PATH=/Applications/Ableton Live 12 Beta.app/Contents/Helpers/ExtensionHost/ExtensionHostNodeModule.node
 ```
@@ -136,7 +139,7 @@ You should see:
 ```
 Starting Extension Host...
   Extension: /path/to/samplebrain
-  Live: /Applications/Ableton Live 12 Beta.app/...
+  Live: C:\ProgramData\Ableton\Live 12 Beta\Program\ExtensionHost\ExtensionHostNodeModule.node
 
 info: #######################################
 info: Started: Extension Host 1.0.0
@@ -159,7 +162,7 @@ npm run build
 
 ```bash
 npm run package
-# → SampleBrain-1.0.0.ablx
+# → SampleBrain-1.1.1.ablx
 ```
 
 Drag the `.ablx` into **Preferences → Extensions** (Developer Mode OFF) to install it permanently.
@@ -195,7 +198,7 @@ Extensions are **one-shot**: triggered by right-click, run to completion, then s
 ```typescript
 export function activate(activation: ActivationContext) {
   const ctx = initialize(activation, "1.0.0");
-  ctx.ui.registerContextMenuAction("AudioTrack.ArrangementSelection", "SampleBrain…", "cmd.id");
+  ctx.ui.registerContextMenuAction("AudioClip", "Process Clip…", "cmd.id");
   ctx.commands.registerCommand("cmd.id", async (arg) => { /* ... */ });
 }
 ```

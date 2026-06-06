@@ -356,7 +356,7 @@
       <span class="help tip-down" data-tip="Audio tracks providing the raw material. The output is built exclusively from grains taken from these tracks.">?</span>
     </div>
     <div id="track-list"></div>
-    <div class="drop-zone" id="drop-zone">Drop WAV / AIFF from Finder</div>
+    <div class="drop-zone" id="drop-zone">Drop WAV / AIFF file</div>
     <div class="drop-files-list" id="drop-files-list"></div>
   </div>
 
@@ -716,7 +716,7 @@ Click ▶ to audition before committing.">?</span>
   }
 
   function openURL(url) {
-    fetch('/open?url=' + encodeURIComponent(url)).catch(() => {});
+    window.open(url, '_blank', 'noopener');
   }
   document.getElementById('sb-link').onclick = () => openURL('https://gitlab.com/then-try-this/samplebrain');
   document.getElementById('sernn-link').onclick = () => openURL('https://linktr.ee/sernn');

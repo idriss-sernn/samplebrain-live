@@ -1,13 +1,17 @@
 {
   "name": "samplebrain",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "main": "dist/extension.js",
-  "engines": { "node": ">=22.11.0" },
+  "engines": {
+    "node": ">=22.11.0"
+  },
   "scripts": {
-    "build": "tsc --noEmit && tsx build.ts --production",
-    "build:dev": "tsc --noEmit && tsx build.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && tsx build.ts --production",
+    "build:dev": "npm run typecheck && tsx build.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "start": "npm run build:dev && extensions-cli run",
     "package": "npm run build && extensions-cli package"
   },

@@ -1,15 +1,17 @@
 import * as http from "node:http";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { execFile } from "node:child_process";
 import * as net from "node:net";
+import * as os from "node:os";
 import { URL } from "node:url";
 import {
   initialize,
+  AudioClip,
   AudioTrack,
   DataModelObject,
   type ActivationContext,
   type ArrangementSelection,
+  type Handle,
 } from "@ableton-extensions/sdk";
 import dialogHtml from "./dialog.html";
 import { buildBrain, buildTarget, synthesize, type BrainParams, type MatchParams } from "./brain.js";
@@ -19,41 +21,98 @@ export function activate(activation: ActivationContext) {
   const ctx = initialize(activation, "1.0.0");
 
   ctx.commands.registerCommand("samplebrain.process", (arg: unknown) =>
-    void run(ctx, arg as ArrangementSelection).catch(console.error),
+    void run(ctx, arg).catch(console.error),
   );
 
+  console.log("SampleBrain: extension loaded");
   ctx.ui.registerContextMenuAction(
     "AudioTrack.ArrangementSelection",
-    "SampleBrain…",
+    "Process Selection…",
     "samplebrain.process",
   );
+  ctx.ui.registerContextMenuAction("AudioClip", "Process Clip…", "samplebrain.process");
 }
 
 type Ctx = ReturnType<typeof initialize>;
 
-async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
+interface TargetSelection {
+  targetTrack: AudioTrack<"1.0.0">;
+  selStart: number;
+  selEnd: number;
+}
+
+async function resolveTempDir(ctx: Ctx): Promise<string> {
+  const tempDir = ctx.environment.tempDirectory ?? path.join(os.tmpdir(), "samplebrain-live");
+  await fs.mkdir(tempDir, { recursive: true });
+  return tempDir;
+}
+
+function isArrangementSelection(arg: unknown): arg is ArrangementSelection {
+  return (
+    typeof arg === "object" &&
+    arg !== null &&
+    Array.isArray((arg as ArrangementSelection).selected_lanes)
+  );
+}
+
+function resolveTargetSelection(
+  ctx: Ctx,
+  arg: unknown,
+  allAudio: AudioTrack<"1.0.0">[],
+): TargetSelection | null {
+  if (isArrangementSelection(arg)) {
+    const selectedTracks = arg.selected_lanes
+      .map((h) => ctx.getObjectFromHandle(h, DataModelObject))
+      .filter((o): o is AudioTrack<"1.0.0"> => o instanceof AudioTrack);
+
+    const targetTrack = selectedTracks[0];
+    if (!targetTrack) return null;
+
+    return {
+      targetTrack,
+      selStart: arg.time_selection_start,
+      selEnd: arg.time_selection_end,
+    };
+  }
+
+  const clip = ctx.getObjectFromHandle(arg as Handle, AudioClip);
+  const clipId = clip.handle.id;
+  const targetTrack = allAudio.find((track) =>
+    track.arrangementClips.some((candidate) => candidate.handle.id === clipId),
+  );
+
+  if (!targetTrack) {
+    console.error("SampleBrain: audio clip must be in Arrangement View");
+    return null;
+  }
+
+  return {
+    targetTrack,
+    selStart: clip.startTime,
+    selEnd: clip.endTime,
+  };
+}
+
+async function run(ctx: Ctx, arg: unknown): Promise<void> {
+  console.log("SampleBrain: command triggered");
+
   const song = ctx.application.song;
   if (!song) return;
 
-  const selectedTracks = selection.selected_lanes
-    .map((h) => ctx.getObjectFromHandle(h, DataModelObject))
-    .filter((o): o is AudioTrack<"1.0.0"> => o instanceof AudioTrack);
+  // All AudioTracks in the project, as brain source candidates
+  const allAudio = song.tracks.filter((t): t is AudioTrack<"1.0.0"> => t instanceof AudioTrack);
 
-  if (selectedTracks.length === 0) return;
-  const targetTrack = selectedTracks[0]!;
+  const targetSelection = resolveTargetSelection(ctx, arg, allAudio);
+  if (!targetSelection) return;
+  const { targetTrack, selStart, selEnd } = targetSelection;
 
-  // Capture selection bounds immediately — the ArrangementSelection proxy becomes
-  // stale once showModalDialog suspends the command handler, returning 0 for both values.
-  const selStart = selection.time_selection_start;
-  const selEnd = selection.time_selection_end;
-
+  // Validate the captured target range before opening the dialog.
   if (selEnd - selStart < 0.01) {
     console.error("SampleBrain: selection is empty — drag a time range in the Arrangement View before right-clicking");
     return;
   }
 
-  // All AudioTracks in the project, as brain source candidates
-  const allAudio = song.tracks.filter((t): t is AudioTrack<"1.0.0"> => t instanceof AudioTrack);
+  const tempDir = await resolveTempDir(ctx);
 
   // Exclude the target track from brain sources (same-track concatenation is pointless)
   const targetAudioIdx = allAudio.findIndex(t => t === targetTrack || t.name === targetTrack.name);
@@ -86,10 +145,6 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       );
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(page);
-    } else if (req.method === "GET" && reqUrl.pathname === "/open") {
-      const url = reqUrl.searchParams.get("url") ?? "";
-      if (url.startsWith("https://")) execFile("open", [url]);
-      res.writeHead(204).end();
     } else if (req.method === "POST" && reqUrl.pathname === "/upload-file") {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -98,8 +153,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
           const buf = Buffer.concat(chunks);
           const filename = (req.headers["x-filename"] as string) ?? "sample.wav";
           const ext = path.extname(filename) || ".wav";
-          const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
-          const outPath = path.join(tmpDir, `sb_drop_${Date.now()}${ext}`);
+          const outPath = path.join(tempDir, `sb_drop_${Date.now()}${ext}`);
           await fs.writeFile(outPath, buf);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, path: outPath }));
@@ -355,8 +409,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       update("Writing output…", 85);
       if (signal.aborted) return;
       const wavBuf = encodeWav(output, sampleRate, params.ampWeight);
-      const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
-      const outPath = path.join(tmpDir, `samplebrain_${Date.now()}.wav`);
+      const outPath = path.join(tempDir, `samplebrain_${Date.now()}.wav`);
       await fs.writeFile(outPath, wavBuf);
       console.log(`SampleBrain: wrote ${wavBuf.length} bytes → ${outPath}`);
 
