@@ -2,7 +2,7 @@
   "name": "SampleBrain",
   "author": "Sernn",
   "entry": "dist/extension.js",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "minimumApiVersion": "1.0.0",
   "permissions": ["filesystem", "network"]
 }

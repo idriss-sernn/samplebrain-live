@@ -19,11 +19,4 @@ await esbuild.build({
   entryPoints: ["src/extension.ts"],
   outfile: manifest.entry,
   ...commonOptions,
-  external: ["./runtime.cjs"],
-});
-
-await esbuild.build({
-  entryPoints: ["src/runtime.ts"],
-  outfile: "dist/runtime.cjs",
-  ...commonOptions,
 });

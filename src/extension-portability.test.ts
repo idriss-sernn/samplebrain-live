@@ -16,37 +16,35 @@ test("extension never falls back to Unix-only temp paths", async () => {
   assert.match(source, /os\.tmpdir\(\)/);
 });
 
-test("context menu titles rely on Live's automatic extension prefix", async () => {
+test("context menu titles are explicit for installed Live Beta menus", async () => {
   const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
 
-  assert.match(source, /"Process Selection…"/);
-  assert.match(source, /"Process Clip…"/);
-  assert.doesNotMatch(source, /"SampleBrain: Process/);
+  assert.match(source, /"SampleBrain: Process Selection\.\.\."/);
+  assert.match(source, /"SampleBrain: Process Clip\.\.\."/);
 });
 
 test("extension is visible from ordinary audio clip context menus", async () => {
   const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
 
   assert.match(source, /registerContextMenuAction\(\s*"AudioClip"/);
-  assert.match(source, /"Process Clip…"/);
+  assert.match(source, /"SampleBrain: Process Clip\.\.\."/);
 });
 
-test("production entry stays as a lightweight activation shim", async () => {
+test("production entry keeps heavy work behind the command handler", async () => {
   const source = await readFile(new URL("./extension.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /node:http|node:fs\/promises|node:net|\.\/dialog\.html|\.\/brain\.js|\.\/wav\.js/);
-  assert.match(source, /import\(runtimeModulePath\)/);
+  assert.match(source, /void run\(ctx, arg\)\.catch\(console\.error\)/);
 });
 
-test("packaging includes the split runtime bundle", async () => {
+test("packaging uses a single production entry file", async () => {
   const packageJson = JSON.parse(
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   ) as { scripts?: Record<string, string> };
   const buildScript = await readFile(new URL("../build.ts", import.meta.url), "utf8");
 
-  assert.match(buildScript, /src\/runtime\.ts/);
-  assert.match(buildScript, /dist\/runtime\.cjs/);
-  assert.match(packageJson.scripts?.package ?? "", /-i dist\/runtime\.cjs/);
+  assert.doesNotMatch(buildScript, /dist\/runtime\.cjs/);
+  assert.doesNotMatch(packageJson.scripts?.package ?? "", /-i dist\/runtime\.cjs/);
 });
 
 test("package exposes a separate typecheck gate", async () => {

@@ -1,7 +1,7 @@
 {
   "name": "samplebrain",
   "private": true,
-  "version": "1.1.4",
+  "version": "1.1.5",
   "type": "module",
   "main": "dist/extension.js",
   "engines": {
@@ -13,7 +13,7 @@
     "build:dev": "npm run typecheck && tsx build.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "start": "npm run build:dev && extensions-cli run",
-    "package": "npm run build && extensions-cli package . -i dist/runtime.cjs"
+    "package": "npm run build && extensions-cli package ."
   },
   "dependencies": {
     "@ableton-extensions/sdk": "file:./vendor/ableton-extensions-sdk-1.0.0-beta.0.tgz"
