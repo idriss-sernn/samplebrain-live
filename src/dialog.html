@@ -733,9 +733,11 @@ Click ▶ to audition before committing.">?</span>
   };
 
   document.getElementById('rnd-btn').addEventListener('click', () => {
+    // Floor overrides: prevent near-silence values from randomization
+    const rndMin = { 'density': 40, 'amp-weight': 50 };
     ['block-size', 'overlap', 'amp-weight', 'pitch-shift', 'pitch-var', 'novelty', 'boredom', 'stickiness', 'voices', 'reverse', 'density'].forEach(id => {
       const el = document.getElementById(id);
-      const min = +el.min, max = +el.max, step = +el.step || 5;
+      const min = rndMin[id] ?? +el.min, max = +el.max, step = +el.step || 5;
       const steps = Math.floor((max - min) / step);
       el.value = min + Math.floor(Math.random() * (steps + 1)) * step;
       el.dispatchEvent(new Event('input'));

@@ -217,7 +217,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
 
   let rawResult: string;
   try {
-    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 720);
+    rawResult = await ctx.ui.showModalDialog(`http://127.0.0.1:${port}/`, 576, 780);
   } finally {
     server.closeAllConnections?.();
     server.close();
