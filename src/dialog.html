@@ -566,6 +566,7 @@ Click ▶ to audition before committing.">?</span>
   if (B64) document.getElementById('at-logo').src = 'data:image/png;base64,' + B64;
 
   const init = window.__SB_INIT__;
+  const sessionToken = init.sessionToken;
   document.getElementById('target-name').textContent = init.targetName;
 
   const checked = new Set();
@@ -578,9 +579,15 @@ Click ▶ to audition before committing.">?</span>
     init.availableTracks.forEach(t => {
       const row = document.createElement('div');
       row.className = 't-row';
-      row.innerHTML = '<div class="t-check"><div class="t-dot"></div></div>'
-        + '<span class="t-idx">' + String(t.index+1).padStart(2,'0') + '</span>'
-        + '<span class="t-name">' + t.name + '</span>';
+      // Use createElement/textContent — never innerHTML with user data (track names)
+      const check = document.createElement('div'); check.className = 't-check';
+      const dot = document.createElement('div'); dot.className = 't-dot';
+      check.appendChild(dot);
+      const idx = document.createElement('span'); idx.className = 't-idx';
+      idx.textContent = String(t.index + 1).padStart(2, '0');
+      const name = document.createElement('span'); name.className = 't-name';
+      name.textContent = t.name;
+      row.appendChild(check); row.appendChild(idx); row.appendChild(name);
       row.addEventListener('click', () => {
         const on = checked.has(t.index);
         on ? checked.delete(t.index) : checked.add(t.index);
@@ -629,7 +636,7 @@ Click ▶ to audition before committing.">?</span>
           const buf = await file.arrayBuffer();
           const res = await fetch('/upload-file', {
             method: 'POST', body: buf,
-            headers: { 'X-Filename': file.name }
+            headers: { 'X-Filename': file.name, 'x-session-token': sessionToken }
           });
           const json = await res.json();
           filePath = json.path;
@@ -716,7 +723,7 @@ Click ▶ to audition before committing.">?</span>
   }
 
   function openURL(url) {
-    fetch('/open?url=' + encodeURIComponent(url)).catch(() => {});
+    fetch('/open?url=' + encodeURIComponent(url), { headers: { 'x-session-token': sessionToken } }).catch(() => {});
   }
   document.getElementById('sb-link').onclick = () => openURL('https://gitlab.com/then-try-this/samplebrain');
   document.getElementById('sernn-link').onclick = () => openURL('https://linktr.ee/sernn');
@@ -839,7 +846,7 @@ Click ▶ to audition before committing.">?</span>
     let pollTimer = setInterval(async () => {
       if (myId !== previewReqId) { clearInterval(pollTimer); return; }
       try {
-        const r = await fetch('/preview-progress');
+        const r = await fetch('/preview-progress', { headers: { 'x-session-token': sessionToken } });
         if (!r.ok || myId !== previewReqId) return;
         const prog = await r.json();
         if (prog.total > 0 && prog.done < prog.total) {
@@ -851,7 +858,7 @@ Click ▶ to audition before committing.">?</span>
     try {
       const res = await fetch('/preview', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-session-token': sessionToken },
         body: JSON.stringify(collectParams()),
       });
       if (myId !== previewReqId) return;

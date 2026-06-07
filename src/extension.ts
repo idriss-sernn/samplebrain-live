@@ -1,6 +1,7 @@
 import * as http from "node:http";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import * as net from "node:net";
 import { URL } from "node:url";
@@ -58,11 +59,15 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
   // Exclude the target track from brain sources (same-track concatenation is pointless)
   const targetAudioIdx = allAudio.findIndex(t => t === targetTrack || t.name === targetTrack.name);
 
+  // Random token — required on all API requests so other local processes can't call the endpoints
+  const sessionToken = crypto.randomBytes(16).toString("hex");
+
   const initData = {
     targetName: targetTrack.name,
     availableTracks: allAudio
       .map((t, i) => ({ index: i, name: t.name }))
       .filter(({ index }) => index !== targetAudioIdx),
+    sessionToken,
   };
 
   let pendingPreviewId = 0;
@@ -80,12 +85,19 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     const reqUrl = new URL(req.url ?? "/", `http://127.0.0.1`);
 
     if (req.method === "GET" && reqUrl.pathname === "/") {
+      // XSS-safe JSON injection — escape <, >, & so they can't break out of the <script> block
+      const safeJson = JSON.stringify(initData)
+        .replace(/</g, "\\u003c")
+        .replace(/>/g, "\\u003e")
+        .replace(/&/g, "\\u0026");
       const page = dialogHtml.replace(
         "</head>",
-        `<script>window.__SB_INIT__ = ${JSON.stringify(initData)};</script></head>`,
+        `<script>window.__SB_INIT__ = ${safeJson};</script></head>`,
       );
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(page);
+    } else if (req.headers["x-session-token"] !== sessionToken) {
+      res.writeHead(403).end();
     } else if (req.method === "GET" && reqUrl.pathname === "/open") {
       const url = reqUrl.searchParams.get("url") ?? "";
       if (url.startsWith("https://")) execFile("open", [url]);
@@ -97,7 +109,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         try {
           const buf = Buffer.concat(chunks);
           const filename = (req.headers["x-filename"] as string) ?? "sample.wav";
-          const ext = path.extname(filename) || ".wav";
+          const rawExt = path.extname(filename).toLowerCase();
+          const allowedExts = [".wav", ".aif", ".aiff"];
+          const ext = allowedExts.includes(rawExt) ? rawExt : ".wav";
           const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
           const outPath = path.join(tmpDir, `sb_drop_${Date.now()}${ext}`);
           await fs.writeFile(outPath, buf);
@@ -169,7 +183,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         if (stale()) { res.writeHead(409).end(); return; }
         const track = allAudio[idx];
         if (!track || track.arrangementClips.length === 0) continue;
-        const brainEnd = Math.max(...track.arrangementClips.map((c) => c.endTime));
+        const brainEnd = track.arrangementClips.reduce((m, c) => Math.max(m, c.endTime), 0);
         const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
         if (stale()) { res.writeHead(409).end(); return; }
         const brainData = await decodeWav(brainWavPath);
@@ -274,7 +288,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
           console.warn(`SampleBrain: brain track "${track.name}" has no clips — skipping`);
           continue;
         }
-        const brainEnd = Math.max(...clips.map((c) => c.endTime));
+        const brainEnd = clips.reduce((m, c) => Math.max(m, c.endTime), 0);
         const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
         if (signal.aborted) return;
         const brainData = await decodeWav(brainWavPath);

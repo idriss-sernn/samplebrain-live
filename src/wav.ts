@@ -47,6 +47,7 @@ function decodeRiff(buf: Buffer): WavData {
   const sampleRate = fmtChunk.readUInt32LE(4);
   const bitsPerSample = fmtChunk.readUInt16LE(14);
   const bytesPerSample = bitsPerSample / 8;
+  if (channels === 0 || bytesPerSample === 0) throw new Error(`Invalid WAV: channels=${channels} bitsPerSample=${bitsPerSample}`);
   const numFrames = Math.floor(dataChunk.length / (channels * bytesPerSample));
 
   const mono = new Float64Array(numFrames);
@@ -127,6 +128,7 @@ function decodeAiff(buf: Buffer): WavData {
   // fl32 / fl64 = IEEE float (AIFF-C)
   const isFloat = compressionType === "FL32" || compressionType === "FL64";
   const bytesPerSample = bitsPerSample / 8;
+  if (channels === 0 || bytesPerSample === 0) throw new Error(`Invalid AIFF: channels=${channels} bitsPerSample=${bitsPerSample}`);
   const numFrames = numSampleFrames || Math.floor(soundData.length / (channels * bytesPerSample));
   const mono = new Float64Array(numFrames);
 
