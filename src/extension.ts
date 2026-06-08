@@ -84,15 +84,20 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
   const server = http.createServer((req, res) => {
     const reqUrl = new URL(req.url ?? "/", `http://127.0.0.1`);
 
+    // Auth: everything except the initial page load requires the session token
+    const isPageLoad = req.method === "GET" && reqUrl.pathname === "/";
+    if (!isPageLoad && (req.headers["x-sb-token"] as string) !== sessionToken) {
+      res.writeHead(403).end();
+      return;
+    }
+
     if (req.method === "GET" && reqUrl.pathname === "/") {
-      // XSS-safe JSON injection — escape <, >, & so they can't break out of the <script> block
-      const safeJson = JSON.stringify(initData)
-        .replace(/</g, "\\u003c")
-        .replace(/>/g, "\\u003e")
-        .replace(/&/g, "\\u0026");
+      // Escape JSON before embedding in <script>: neutralises </script> breakout via track names (XSS #1)
+      const safeInit = JSON.stringify(initData)
+        .replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
       const page = dialogHtml.replace(
         "</head>",
-        `<script>window.__SB_INIT__ = ${safeJson};</script></head>`,
+        `<script>window.__SB_INIT__ = ${safeInit};window.__SB_TOKEN__ = ${JSON.stringify(sessionToken)};</script></head>`,
       );
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(page);
@@ -109,9 +114,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         try {
           const buf = Buffer.concat(chunks);
           const filename = (req.headers["x-filename"] as string) ?? "sample.wav";
+          // Whitelist extension — never trust X-Filename (null-byte / arbitrary ext injection)
           const rawExt = path.extname(filename).toLowerCase();
-          const allowedExts = [".wav", ".aif", ".aiff"];
-          const ext = allowedExts.includes(rawExt) ? rawExt : ".wav";
+          const ext = [".wav", ".aif", ".aiff"].includes(rawExt) ? rawExt : ".wav";
           const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
           const outPath = path.join(tmpDir, `sb_drop_${Date.now()}${ext}`);
           await fs.writeFile(outPath, buf);
@@ -148,7 +153,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     if (stale()) { res.writeHead(409).end(); return; }
 
     // selStart/selEnd captured in outer run() scope — always valid
-    if (selEnd - selStart < 0.01) { console.error("SampleBrain preview: selection too short", selStart, selEnd); res.writeHead(400).end(); return; }
+    if (selEnd - selStart < 0.01) { console.error("SampleBrain preview: selection too short", selStart, selEnd); res.writeHead(400, { "Content-Type": "text/plain" }).end("No target selected — highlight a time range on an audio track first"); return; }
 
     // Target PCM — rendered once for the whole dialog session
     const brainKey = p.brainTrackIndices.join(",") + "|" + p.droppedFiles.join(",");
@@ -192,13 +197,14 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       }
       for (const filePath of p.droppedFiles) {
         if (stale()) { res.writeHead(409).end(); return; }
+        if (![".wav", ".aif", ".aiff"].includes(path.extname(filePath).toLowerCase())) continue; // #7: only ever read audio paths
         try { newPcms.push((await decodeWav(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
       }
       if (!stale()) { cachedBrainKey = brainKey; cachedBrainPcms = newPcms; }
     }
     const brainPcms = cachedBrainPcms;
 
-    if (brainPcms.length === 0) { console.error("SampleBrain preview: all brain sources empty"); res.writeHead(400).end(); return; }
+    if (brainPcms.length === 0) { console.error("SampleBrain preview: all brain sources empty"); res.writeHead(400, { "Content-Type": "text/plain" }).end("No usable brain source — check a track with audio clips, or drop a WAV/AIFF file (MP3/FLAC not supported)"); return; }
     if (stale()) { res.writeHead(409).end(); return; }
 
     const { sampleRate } = targetData;
@@ -213,7 +219,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     };
     const brainBlocks = buildBrain(brainPcms, brainParams);
     const targetBlocks = buildTarget(targetData.samples, brainParams);
-    if (brainBlocks.length === 0 || targetBlocks.length === 0) { console.error("SampleBrain preview: 0 blocks — blockSize too large?", brainBlocks.length, targetBlocks.length); res.writeHead(400).end(); return; }
+    if (brainBlocks.length === 0 || targetBlocks.length === 0) { console.error("SampleBrain preview: 0 blocks — blockSize too large?", brainBlocks.length, targetBlocks.length); res.writeHead(400, { "Content-Type": "text/plain" }).end("Block size too large for this selection — lower it, or select a longer range"); return; }
     if (stale()) { res.writeHead(409).end(); return; }
 
     const hopSize = Math.max(1, Math.round(blockSizeSamples * (1 - p.overlapRatio)));
@@ -271,8 +277,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       // Guard: target must have audio content
       const targetPeak = targetData.samples.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
       if (targetPeak < 1e-4) {
-        console.error(`SampleBrain: target track "${targetTrack.name}" has no audio in the selected range. Right-click on a track that has clips.`);
-        return;
+        throw new Error(`Target track "${targetTrack.name}" has no audio in the selected range — select a range that contains audio clips.`);
       }
 
       // --- Render each brain track ---
@@ -299,6 +304,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       for (let i = 0; i < params.droppedFiles.length; i++) {
         if (signal.aborted) return;
         const filePath = params.droppedFiles[i]!;
+        if (![".wav", ".aif", ".aiff"].includes(path.extname(filePath).toLowerCase())) { console.warn(`SampleBrain: ignoring non-audio path "${filePath}"`); continue; } // #7
         update(`Loading file ${i + 1}/${params.droppedFiles.length}…`, 40 + i * (8 / Math.max(1, params.droppedFiles.length)));
         try {
           const brainData = await decodeWav(filePath);
@@ -309,8 +315,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       }
 
       if (brainPcms.length === 0) {
-        console.error("SampleBrain: all selected brain tracks are empty");
-        return;
+        throw new Error("No usable brain source — check a track with audio clips, or drop a WAV/AIFF file (MP3/FLAC not supported).");
       }
 
       const { sampleRate } = targetData;
@@ -333,8 +338,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       console.log(`SampleBrain: ${brainBlocks.length} brain blocks built`);
 
       if (brainBlocks.length === 0) {
-        console.error("SampleBrain: brain produced 0 blocks — try a smaller block size");
-        return;
+        throw new Error("Brain produced 0 grains — lower the block size.");
       }
 
       // --- Analyse target ---
@@ -344,8 +348,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       console.log(`SampleBrain: ${targetBlocks.length} target blocks`);
 
       if (targetBlocks.length === 0) {
-        console.error("SampleBrain: target produced 0 blocks — selection too short or block size too large");
-        return;
+        throw new Error("Target produced 0 grains — selection too short, or block size too large.");
       }
 
       // --- Synthesise ---
