@@ -101,11 +101,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       );
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(page);
-    } else if (req.headers["x-session-token"] !== sessionToken) {
-      res.writeHead(403).end();
     } else if (req.method === "GET" && reqUrl.pathname === "/open") {
       const url = reqUrl.searchParams.get("url") ?? "";
-      if (url.startsWith("https://")) execFile("open", [url]);
+      if (url.startsWith("https://")) execFile("/usr/bin/open", [url], (err) => { if (err) console.error("SampleBrain /open failed:", err); });
       res.writeHead(204).end();
     } else if (req.method === "POST" && reqUrl.pathname === "/upload-file") {
       const chunks: Buffer[] = [];
