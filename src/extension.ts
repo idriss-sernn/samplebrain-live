@@ -4,6 +4,8 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import * as net from "node:net";
+import * as https from "node:https";
+import * as os from "node:os";
 import { URL } from "node:url";
 import {
   initialize,
@@ -14,7 +16,75 @@ import {
 } from "@ableton-extensions/sdk";
 import dialogHtml from "./dialog.html";
 import { buildBrain, buildTarget, synthesize, type BrainParams, type MatchParams } from "./brain.js";
-import { decodeWav, encodeWav } from "./wav.js";
+import { decodeWav, encodeWav, resampleLinear } from "./wav.js";
+import { generateSiblings, detectOnsetFractions } from "./siblings.js";
+
+// ⚠️ Keep in sync with manifest.json / package.json on every release.
+const APP_VERSION = "1.2.0";
+const REPO = "idriss-sernn/samplebrain-live";
+
+// Largest block size (samples) that still yields ≥1 grain from both the target and at
+// least one brain source. The requested size is clamped to this instead of erroring out.
+function maxValidBlockSize(targetLen: number, brainPcms: Float64Array[]): number {
+  const longestBrain = brainPcms.reduce((m, p) => Math.max(m, p.length), 0);
+  return Math.max(1, Math.min(targetLen, longestBrain));
+}
+
+// Reads an audio file, working around a macOS firmlink mismatch: Node's permission model
+// (only enforced in the installed .ablx, not in `extensions-cli run`) can deny a
+// "/var/folders/…" path when the grant is on the canonical "/private/var/folders/…" (or
+// vice-versa). On a restriction error we retry with the /private prefix toggled.
+async function decodeAudioRobust(p: string) {
+  try {
+    return await decodeWav(p);
+  } catch (e) {
+    const msg = String((e as { message?: string })?.message ?? e);
+    if (!/restricted|ERR_ACCESS_DENIED|allow-fs/i.test(msg)) throw e;
+    const alt = p.startsWith("/private/") ? p.slice(8) : "/private" + p;
+    console.warn(`SampleBrain: fs read restricted on "${p}" — retrying "${alt}"`);
+    return await decodeWav(alt);
+  }
+}
+
+// Returns true when `latest` is a strictly newer semver than `current` (tolerates a "v" prefix).
+function isNewerVersion(latest: string, current: string): boolean {
+  const norm = (s: string) => s.replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const a = norm(latest), b = norm(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0, y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+// Fetch the latest GitHub release tag. Resolves null on any error/timeout (offline-safe).
+function fetchLatestRelease(): Promise<{ tag: string; url: string } | null> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      {
+        hostname: "api.github.com",
+        path: `/repos/${REPO}/releases/latest`,
+        headers: { "User-Agent": "SampleBrain-Extension", Accept: "application/vnd.github+json" },
+      },
+      (res) => {
+        if (res.statusCode !== 200) { res.resume(); resolve(null); return; }
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            const j = JSON.parse(Buffer.concat(chunks).toString());
+            if (typeof j.tag_name === "string") {
+              const url = typeof j.html_url === "string" ? j.html_url : `https://github.com/${REPO}/releases`;
+              resolve({ tag: j.tag_name, url });
+            } else resolve(null);
+          } catch { resolve(null); }
+        });
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.setTimeout(4000, () => { req.destroy(); resolve(null); });
+  });
+}
 
 export function activate(activation: ActivationContext) {
   const ctx = initialize(activation, "1.0.0");
@@ -53,29 +123,32 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     return;
   }
 
-  // All AudioTracks in the project, as brain source candidates
+  // All AudioTracks in the project — candidates for both target and brain sources
   const allAudio = song.tracks.filter((t): t is AudioTrack<"1.0.0"> => t instanceof AudioTrack);
 
-  // Exclude the target track from brain sources (same-track concatenation is pointless)
-  const targetAudioIdx = allAudio.findIndex(t => t === targetTrack || t.name === targetTrack.name);
+  // Default target = the right-clicked track; the dialog can switch to any other track
+  const defaultTargetIndex = Math.max(0, allAudio.findIndex(t => t === targetTrack || t.name === targetTrack.name));
 
   // Random token — required on all API requests so other local processes can't call the endpoints
   const sessionToken = crypto.randomBytes(16).toString("hex");
 
   const initData = {
-    targetName: targetTrack.name,
-    availableTracks: allAudio
-      .map((t, i) => ({ index: i, name: t.name }))
-      .filter(({ index }) => index !== targetAudioIdx),
+    tracks: allAudio.map((t, i) => ({ index: i, name: t.name })),
+    defaultTargetIndex,
     sessionToken,
   };
 
   let pendingPreviewId = 0;
 
-  // PCM cache — renderPreFxAudio is called only once per source change, not on every slider move
+  // PCM cache — renderPreFxAudio is called only once per source/target change, not on every slider move
   let cachedTargetPcm: { samples: Float64Array; sampleRate: number } | null = null;
+  let cachedTargetIndex = -1;
   let cachedBrainKey = "";
   let cachedBrainPcms: Float64Array[] = [];
+
+  // Sample Design source = the concatenative-synthesis output. runPreview caches the exact
+  // PCM it last produced here, so "Generate samples" works on the same audio the user saw/selected.
+  let lastSdOutput: { pcm: Float64Array; sampleRate: number } | null = null;
 
   // Progress state — polled by /preview-progress while a render is in flight
   const renderProgress = { done: 0, total: 0 };
@@ -105,6 +178,15 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       const url = reqUrl.searchParams.get("url") ?? "";
       if (url.startsWith("https://")) execFile("/usr/bin/open", [url], (err) => { if (err) console.error("SampleBrain /open failed:", err); });
       res.writeHead(204).end();
+    } else if (req.method === "GET" && reqUrl.pathname === "/check-update") {
+      fetchLatestRelease().then((rel) => {
+        const latest = rel?.tag ?? null;
+        const updateAvailable = !!(latest && isNewerVersion(latest, APP_VERSION));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ current: APP_VERSION, latest, updateAvailable, url: rel?.url ?? `https://github.com/${REPO}/releases` }));
+      }).catch(() => {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ current: APP_VERSION, latest: null, updateAvailable: false }));
+      });
     } else if (req.method === "POST" && reqUrl.pathname === "/upload-file") {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -115,7 +197,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
           // Whitelist extension — never trust X-Filename (null-byte / arbitrary ext injection)
           const rawExt = path.extname(filename).toLowerCase();
           const ext = [".wav", ".aif", ".aiff"].includes(rawExt) ? rawExt : ".wav";
-          const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
+          // Installed .ablx: tempDirectory is the only writable dir (permission model).
+          // Dev (extensions-cli run): it can be undefined → fall back to the OS temp.
+          const tmpDir = ctx.environment.tempDirectory ?? os.tmpdir();
           const outPath = path.join(tmpDir, `sb_drop_${Date.now()}${ext}`);
           await fs.writeFile(outPath, buf);
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -127,6 +211,11 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     } else if (req.method === "GET" && reqUrl.pathname === "/preview-progress") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(renderProgress));
+    } else if (req.method === "GET" && reqUrl.pathname === "/sd-onsets") {
+      // Onset markers for the Sample Design waveform (computed on the last shown output)
+      const onsets = lastSdOutput ? detectOnsetFractions(lastSdOutput.pcm, lastSdOutput.sampleRate) : [];
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ onsets }));
     } else if (req.method === "POST" && reqUrl.pathname === "/preview") {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -153,15 +242,20 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     // selStart/selEnd captured in outer run() scope — always valid
     if (selEnd - selStart < 0.01) { console.error("SampleBrain preview: selection too short", selStart, selEnd); res.writeHead(400, { "Content-Type": "text/plain" }).end("No target selected — highlight a time range on an audio track first"); return; }
 
-    // Target PCM — rendered once for the whole dialog session
-    const brainKey = p.brainTrackIndices.join(",") + "|" + p.droppedFiles.join(",");
-    const needsTarget = !cachedTargetPcm;
+    // Target PCM — re-rendered when the chosen target track changes
+    const targetIdx = p.targetTrackIndex;
+    const targetTrk = allAudio[targetIdx];
+    if (!targetTrk) { res.writeHead(400, { "Content-Type": "text/plain" }).end("Invalid target track"); return; }
+    // Never use the target as its own brain source (same-track concatenation is pointless)
+    const brainIndices = p.brainTrackIndices.filter(i => i !== targetIdx);
+    const brainKey = brainIndices.join(",") + "|" + p.droppedFiles.join(",");
+    const needsTarget = !cachedTargetPcm || cachedTargetIndex !== targetIdx;
     const needsBrain = brainKey !== cachedBrainKey;
 
     if (needsTarget || needsBrain) {
       // Count items that will actually be rendered to show accurate progress
       const tracksWithClips = needsBrain
-        ? p.brainTrackIndices.map(i => allAudio[i]).filter(t => t && t.arrangementClips.length > 0)
+        ? brainIndices.map(i => allAudio[i]).filter(t => t && t.arrangementClips.length > 0)
         : [];
       renderProgress.done = 0;
       renderProgress.total = (needsTarget ? 1 : 0) + tracksWithClips.length + (needsBrain ? p.droppedFiles.length : 0);
@@ -170,11 +264,13 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     }
 
     if (needsTarget) {
-      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
+      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrk, selStart, selEnd);
+      console.log(`SampleBrain: render path="${targetWavPath}" tempDir="${ctx.environment.tempDirectory}"`);
       if (stale()) { res.writeHead(409).end(); return; }
-      const decoded = await decodeWav(targetWavPath);
+      const decoded = await decodeAudioRobust(targetWavPath);
       if (stale()) { res.writeHead(409).end(); return; }
       cachedTargetPcm = decoded;
+      cachedTargetIndex = targetIdx;
       renderProgress.done++;
     }
     const targetData = cachedTargetPcm!;
@@ -182,21 +278,21 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     // Brain PCMs — re-rendered only when the source selection changes, not on slider moves
     if (needsBrain) {
       const newPcms: Float64Array[] = [];
-      for (const idx of p.brainTrackIndices) {
+      for (const idx of brainIndices) {
         if (stale()) { res.writeHead(409).end(); return; }
         const track = allAudio[idx];
         if (!track || track.arrangementClips.length === 0) continue;
         const brainEnd = track.arrangementClips.reduce((m, c) => Math.max(m, c.endTime), 0);
         const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
         if (stale()) { res.writeHead(409).end(); return; }
-        const brainData = await decodeWav(brainWavPath);
+        const brainData = await decodeAudioRobust(brainWavPath);
         newPcms.push(brainData.samples);
         renderProgress.done++;
       }
       for (const filePath of p.droppedFiles) {
         if (stale()) { res.writeHead(409).end(); return; }
         if (![".wav", ".aif", ".aiff"].includes(path.extname(filePath).toLowerCase())) continue; // #7: only ever read audio paths
-        try { newPcms.push((await decodeWav(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
+        try { newPcms.push((await decodeAudioRobust(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
       }
       if (!stale()) { cachedBrainKey = brainKey; cachedBrainPcms = newPcms; }
     }
@@ -206,7 +302,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     if (stale()) { res.writeHead(409).end(); return; }
 
     const { sampleRate } = targetData;
-    const blockSizeSamples = Math.max(64, Math.round((p.blockSizeMs / 1000) * sampleRate));
+    // Clamp the requested block size to what the selection can actually produce (no error)
+    const requestedBlock = Math.max(64, Math.round((p.blockSizeMs / 1000) * sampleRate));
+    const blockSizeSamples = Math.min(requestedBlock, maxValidBlockSize(targetData.samples.length, brainPcms));
     const brainParams: BrainParams = {
       blockSizeSamples,
       overlapRatio: p.overlapRatio,
@@ -217,13 +315,14 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     };
     const brainBlocks = buildBrain(brainPcms, brainParams);
     const targetBlocks = buildTarget(targetData.samples, brainParams);
-    if (brainBlocks.length === 0 || targetBlocks.length === 0) { console.error("SampleBrain preview: 0 blocks — blockSize too large?", brainBlocks.length, targetBlocks.length); res.writeHead(400, { "Content-Type": "text/plain" }).end("Block size too large for this selection — lower it, or select a longer range"); return; }
+    if (brainBlocks.length === 0 || targetBlocks.length === 0) { console.error("SampleBrain preview: 0 blocks after clamp", brainBlocks.length, targetBlocks.length); res.writeHead(400, { "Content-Type": "text/plain" }).end("Selection too short to build any grain — select a longer range"); return; }
     if (stale()) { res.writeHead(409).end(); return; }
 
     const hopSize = Math.max(1, Math.round(blockSizeSamples * (1 - p.overlapRatio)));
-    const matchParams: MatchParams = { novelty: p.novelty, boredom: p.boredom, stickiness: p.stickiness, voices: p.voices, pitchShift: p.pitchShift, pitchShiftVar: p.pitchShiftVar, reverse: p.reverse, density: p.density };
+    const matchParams: MatchParams = { novelty: p.novelty, boredom: p.boredom, stickiness: p.stickiness, voices: p.voices, pitchShift: p.pitchShift, pitchShiftVar: p.pitchShiftVar, reverse: p.reverse, density: p.density, matchMode: p.matchMode };
     const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
     const wavBuf = encodeWav(output, sampleRate, p.ampWeight);
+    lastSdOutput = { pcm: output, sampleRate }; // Sample Design works on this exact output
 
     if (stale()) { res.writeHead(409).end(); return; }
     res.writeHead(200, { "Content-Type": "audio/wav", "Content-Length": String(wavBuf.length) });
@@ -250,7 +349,102 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
   }
   if (params.cancelled) return;
 
+  // ── Sample Design: generate pitched sibling samples/loops from the sources ──
+  if (params.mode === "sample-design") {
+    await ctx.ui.withinProgressDialog("Sample Design", {}, async (update, signal) => {
+      try {
+        const secPerBeat = 60 / song.tempo;
+
+        // Source = the concatenative-synthesis output last shown in the Sample Design waveform
+        if (!lastSdOutput) throw new Error("Open the Sample Design tab and let the waveform load first.");
+        const concat = lastSdOutput.pcm;
+        const sr = lastSdOutput.sampleRate;
+        const baseName = allAudio[params.targetTrackIndex]?.name ?? "synth";
+        let inputSources: { pcm: Float64Array; sampleRate: number; name: string }[] =
+          [{ pcm: concat, sampleRate: sr, name: baseName }];
+        // If the user selected a zone on the waveform, transform only that region
+        const s0 = params.sibSelStart, s1 = params.sibSelEnd;
+        if (s0 >= 0 && s1 > s0 && concat.length > 0) {
+          const a = Math.max(0, Math.floor(s0 * concat.length));
+          const b = Math.min(concat.length, Math.ceil(s1 * concat.length));
+          if (b - a > 64) inputSources = [{ pcm: concat.slice(a, b), sampleRate: sr, name: "selection" }];
+        }
+
+        update("Generating siblings…", 45);
+        const sibs = generateSiblings(inputSources, {
+          minSt: params.sibMinSt,
+          maxSt: params.sibMaxSt,
+          strategy: params.sibStrategy,
+          mode: params.sibMode,
+          layers: params.sibLayers,
+          autoAttenuation: params.sibAutoAtten,
+          generations: params.sibGenerations,
+        });
+        if (sibs.length === 0) throw new Error("No siblings generated.");
+
+        // Export folder: ~/Music/SampleBrain/<timestamp>/
+        // Permission model: only storage/temp dirs are writable — not ~/Music. The imported
+        // clip copies also land in the Live project folder (findable, correctly named).
+        // Installed .ablx: storage/temp dirs (permission model). Dev: fall back to OS temp.
+        const base = ctx.environment.storageDirectory ?? ctx.environment.tempDirectory ?? os.tmpdir();
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+        const dir = path.join(base, "SampleBrain", stamp);
+        await fs.mkdir(dir, { recursive: true });
+        console.log(`SampleBrain Sample Design: ${sibs.length} siblings → ${dir}`);
+
+        const outTrack = await song.createAudioTrack();
+        outTrack.name = "SB Siblings";
+        let t = selStart;
+        const sanitize = (s: string) => s.replace(/[/\\:*?"<>|]/g, "_").trim() || "sample";
+
+        let written = 0, placed = 0;
+        for (let i = 0; i < sibs.length; i++) {
+          if (signal.aborted) return;
+          const sib = sibs[i]!;
+          update(`Writing sample ${i + 1}/${sibs.length}…`, 55 + i * (40 / sibs.length));
+          const tag = sib.sourceName === "layered" ? "layered" : `${sanitize(sib.sourceName)} ${sib.label}`;
+          const fname = `SB ${tag} ${i + 1}.wav`;
+          const outPath = path.join(dir, fname);
+          // Write the WAV first so the file exists on disk even if clip placement fails.
+          // Use the proven float32 encoder (like Synth) — 24-bit PCM WAV breaks importIntoProject.
+          try {
+            const wav = encodeWav(resampleLinear(sib.pcm, sib.sampleRate, 44100), 44100, 1);
+            await fs.writeFile(outPath, wav);
+            written++;
+          } catch (e) {
+            console.error(`SampleBrain: failed to write "${fname}":`, e);
+            continue;
+          }
+          // Import + place a clip — failure here is non-fatal (the WAV is already saved)
+          try {
+            const imported = await ctx.resources.importIntoProject(outPath);
+            const durBeats = (sib.pcm.length / sib.sampleRate) / secPerBeat;
+            await outTrack.createAudioClip({ filePath: imported, startTime: t, duration: durBeats, isWarped: false });
+            t += durBeats;
+            placed++;
+          } catch (e) {
+            console.error(`SampleBrain: failed to place clip for "${fname}":`, e);
+          }
+        }
+
+        // Always reveal the export folder, even if some clips failed
+        execFile("/usr/bin/open", [dir], (err) => { if (err) console.error("SampleBrain reveal folder failed:", err); });
+        console.log(`SampleBrain Sample Design: wrote ${written}/${sibs.length} WAVs, placed ${placed} clips → ${dir}`);
+        update(`Done — ${written} samples in ${dir}`, 100);
+      } catch (err) {
+        if (signal.aborted) return;
+        console.error("SampleBrain Sample Design error:", err);
+        throw err;
+      }
+    });
+    return;
+  }
+
+  // Target chosen in the dialog (may differ from the right-clicked track)
+  const chosenTarget = allAudio[params.targetTrackIndex] ?? targetTrack;
+
   const brainTracks = params.brainTrackIndices
+    .filter((i) => i !== params.targetTrackIndex) // never concatenate the target with itself
     .map((i) => allAudio[i])
     .filter((t): t is AudioTrack<"1.0.0"> => t !== undefined);
 
@@ -267,15 +461,15 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
 
       // --- Render target ---
       update(`Rendering target… (${selStart.toFixed(2)}–${selEnd.toFixed(2)} beats)`, 5);
-      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrack, selStart, selEnd);
+      const targetWavPath = await ctx.resources.renderPreFxAudio(chosenTarget, selStart, selEnd);
       if (signal.aborted) return;
-      const targetData = await decodeWav(targetWavPath);
+      const targetData = await decodeAudioRobust(targetWavPath);
       if (signal.aborted) return;
 
       // Guard: target must have audio content
       const targetPeak = targetData.samples.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
       if (targetPeak < 1e-4) {
-        throw new Error(`Target track "${targetTrack.name}" has no audio in the selected range — select a range that contains audio clips.`);
+        throw new Error(`Target track "${chosenTarget.name}" has no audio in the selected range — select a range that contains audio clips.`);
       }
 
       // --- Render each brain track ---
@@ -294,7 +488,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         const brainEnd = clips.reduce((m, c) => Math.max(m, c.endTime), 0);
         const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
         if (signal.aborted) return;
-        const brainData = await decodeWav(brainWavPath);
+        const brainData = await decodeAudioRobust(brainWavPath);
         brainPcms.push(brainData.samples);
       }
 
@@ -305,7 +499,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         if (![".wav", ".aif", ".aiff"].includes(path.extname(filePath).toLowerCase())) { console.warn(`SampleBrain: ignoring non-audio path "${filePath}"`); continue; } // #7
         update(`Loading file ${i + 1}/${params.droppedFiles.length}…`, 40 + i * (8 / Math.max(1, params.droppedFiles.length)));
         try {
-          const brainData = await decodeWav(filePath);
+          const brainData = await decodeAudioRobust(filePath);
           brainPcms.push(brainData.samples);
         } catch (err) {
           console.warn(`SampleBrain: skipping dropped file "${filePath}": ${err}`);
@@ -317,8 +511,10 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       }
 
       const { sampleRate } = targetData;
-      const blockSizeSamples = Math.max(64, Math.round((params.blockSizeMs / 1000) * sampleRate));
-      console.log(`SampleBrain: sampleRate=${sampleRate}, blockSize=${blockSizeSamples} samples, target=${targetData.numSamples} samples`);
+      // Clamp the requested block size to what the selection can actually produce (no error)
+      const requestedBlock = Math.max(64, Math.round((params.blockSizeMs / 1000) * sampleRate));
+      const blockSizeSamples = Math.min(requestedBlock, maxValidBlockSize(targetData.samples.length, brainPcms));
+      console.log(`SampleBrain: sampleRate=${sampleRate}, blockSize=${blockSizeSamples} samples (requested ${requestedBlock}), target=${targetData.numSamples} samples`);
 
       const brainParams: BrainParams = {
         blockSizeSamples,
@@ -346,7 +542,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       console.log(`SampleBrain: ${targetBlocks.length} target blocks`);
 
       if (targetBlocks.length === 0) {
-        throw new Error("Target produced 0 grains — selection too short, or block size too large.");
+        throw new Error("Target produced 0 grains — selection too short.");
       }
 
       // --- Synthesise ---
@@ -362,6 +558,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         pitchShiftVar: params.pitchShiftVar,
         reverse: params.reverse,
         density: params.density,
+        matchMode: params.matchMode,
       };
       const output = synthesize(targetBlocks, brainBlocks, hopSize, matchParams);
       console.log(`SampleBrain: output ${output.length} samples`);
@@ -370,7 +567,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       update("Writing output…", 85);
       if (signal.aborted) return;
       const wavBuf = encodeWav(output, sampleRate, params.ampWeight);
-      const tmpDir = ctx.environment.tempDirectory ?? "/tmp";
+      const tmpDir = ctx.environment.tempDirectory ?? os.tmpdir(); // dev fallback; installed = host temp
       const outPath = path.join(tmpDir, `samplebrain_${Date.now()}.wav`);
       await fs.writeFile(outPath, wavBuf);
       console.log(`SampleBrain: wrote ${wavBuf.length} bytes → ${outPath}`);
@@ -385,7 +582,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
       const outputDurBeats = outputDurSec / secPerBeat;
 
       const outputTrack = await song.createAudioTrack();
-      outputTrack.name = `SB: ${targetTrack.name}`;
+      outputTrack.name = `SB: ${chosenTarget.name}`;
       await outputTrack.createAudioClip({
         filePath: importedPath,
         startTime: selStart,
@@ -405,8 +602,21 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
 
 interface DialogResult {
   cancelled: boolean;
+  mode: "synth" | "sample-design";
+  // Sample Design params (Audio Siblings — only meaningful when mode === "sample-design")
+  sibMinSt: number;
+  sibMaxSt: number;
+  sibStrategy: "chromatic" | "major" | "minor" | "pentatonic";
+  sibMode: "pitch" | "layered" | "slice" | "automate";
+  sibLayers: number;
+  sibAutoAtten: boolean;
+  sibGenerations: number;
+  sibSelStart: number; // waveform selection start (fraction 0–1), -1 = none
+  sibSelEnd: number;   // waveform selection end (fraction 0–1)
+  targetTrackIndex: number;
   brainTrackIndices: number[];
   droppedFiles: string[];
+  matchMode: "greedy" | "smooth";
   blockSizeMs: number;
   overlapRatio: number;
   windowType: string;
@@ -424,8 +634,10 @@ interface DialogResult {
 }
 
 interface PreviewRequest {
+  targetTrackIndex: number;
   brainTrackIndices: number[];
   droppedFiles: string[];
+  matchMode: "greedy" | "smooth";
   blockSizeMs: number;
   overlapRatio: number;
   windowType: string;

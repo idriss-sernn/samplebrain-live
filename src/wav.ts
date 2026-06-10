@@ -194,3 +194,64 @@ export function encodeWav(samples: Float64Array, sampleRate: number, ampWeight =
 
   return buf;
 }
+
+// ─── Linear resample (mono) ─────────────────────────────────────────────────
+
+export function resampleLinear(samples: Float64Array, fromSR: number, toSR: number): Float64Array {
+  if (fromSR === toSR || samples.length === 0) return samples;
+  const ratio = toSR / fromSR;
+  const outLen = Math.max(1, Math.round(samples.length * ratio));
+  const out = new Float64Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i / ratio;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    const a = samples[idx] ?? 0;
+    const b = samples[idx + 1] ?? a;
+    out[i] = a + frac * (b - a);
+  }
+  return out;
+}
+
+// ─── Encode WAV (24-bit PCM, resampled to targetSR — "Splice" delivery format) ──
+
+export function encodeWav24(samples: Float64Array, sampleRate: number, targetSR = 44100, ampWeight = 1.0): Buffer {
+  const pcm = resampleLinear(samples, sampleRate, targetSR);
+  const bitsPerSample = 24;
+  const numChannels = 1;
+  const bytesPerSample = bitsPerSample / 8;
+  const byteRate = targetSR * numChannels * bytesPerSample;
+  const blockAlign = numChannels * bytesPerSample;
+  const dataSize = pcm.length * blockAlign;
+  const buf = Buffer.allocUnsafe(44 + dataSize);
+
+  buf.write("RIFF", 0, "ascii");
+  buf.writeUInt32LE(36 + dataSize, 4);
+  buf.write("WAVE", 8, "ascii");
+  buf.write("fmt ", 12, "ascii");
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20); // PCM
+  buf.writeUInt16LE(numChannels, 22);
+  buf.writeUInt32LE(targetSR, 24);
+  buf.writeUInt32LE(byteRate, 28);
+  buf.writeUInt16LE(blockAlign, 32);
+  buf.writeUInt16LE(bitsPerSample, 34);
+  buf.write("data", 36, "ascii");
+  buf.writeUInt32LE(dataSize, 40);
+
+  let peak = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const v = Math.abs(pcm[i]!);
+    if (v > peak) peak = v;
+  }
+  const gain = (peak > 1e-9 ? 0.99 / peak : 1) * Math.max(0.01, Math.min(1, ampWeight));
+
+  const MAX24 = 8388607;
+  for (let i = 0; i < pcm.length; i++) {
+    let v = Math.round(Math.max(-1, Math.min(1, pcm[i]! * gain)) * MAX24);
+    if (v < 0) v += 0x1000000; // 24-bit two's complement
+    buf.writeUIntLE(v, 44 + i * 3, 3);
+  }
+
+  return buf;
+}

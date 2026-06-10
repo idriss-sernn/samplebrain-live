@@ -325,6 +325,36 @@
     margin-right: 5px; vertical-align: middle; flex-shrink: 0;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── TABS ── */
+  .tabs {
+    display: flex; flex-shrink: 0;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255,255,255,0.6);
+  }
+  body.dark .tabs { background: rgba(13,13,13,0.9); }
+  .tab {
+    flex: 1; font-family: inherit; font-size: 10px; font-weight: 700;
+    letter-spacing: .16em; text-transform: uppercase;
+    padding: 8px 0; border: none; border-right: 1px solid var(--line);
+    background: transparent; color: var(--dim); cursor: pointer;
+    transition: background .12s, color .12s;
+  }
+  .tab:last-child { border-right: none; }
+  .tab:hover { color: var(--full); }
+  .tab.active { background: var(--full); color: var(--white); }
+
+  .prep-hint { font-size: 9px; font-style: italic; color: var(--dim); letter-spacing: .04em; }
+
+  /* ── UPDATE BADGE ── */
+  .update-badge {
+    display: none; cursor: pointer; margin-left: 6px;
+    font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--white); background: var(--full);
+    padding: 2px 5px; border-radius: 2px; vertical-align: middle;
+    transition: opacity .12s;
+  }
+  .update-badge:hover { opacity: .75; }
 </style>
 </head>
 <body class="dark">
@@ -333,7 +363,8 @@
   <div class="hd-left">
     <div style="display:flex;align-items:baseline;gap:7px">
       <div class="hd-title" id="sb-link" style="cursor:pointer" title="Open SampleBrain on GitLab">SampleBrain</div>
-      <span class="hd-ver" style="font-size:9px;font-weight:600;letter-spacing:.5px;opacity:.45">v1.1.1</span>
+      <span class="hd-ver" style="font-size:9px;font-weight:600;letter-spacing:.5px;opacity:.45">v1.2.0</span>
+      <span class="update-badge" id="update-badge" title="Open the latest release"></span>
     </div>
     <div class="hd-sub">Concatenative synthesis · Aphex Twin · Dave Griffiths</div>
   </div>
@@ -343,14 +374,21 @@
   </div>
 </div>
 
+<div class="tabs">
+  <button class="tab active" id="tab-synth" data-page="synth">Synth</button>
+  <button class="tab" id="tab-prep" data-page="prep">Prep</button>
+  <button class="tab" id="tab-design" data-page="design">Sample Design</button>
+</div>
+
 <div class="body">
 
+  <!-- Shared across tabs: Target + Brain sources always visible -->
   <div class="row">
     <div class="lbl-row">
       <span class="lbl">Target</span>
-      <span class="help tip-down" data-tip="The audio track whose spectral shape guides the reconstruction. Must have audio in the selected range.">?</span>
+      <span class="help tip-down" data-tip="The audio track whose spectral shape guides the reconstruction. Rendered over the time range you selected when opening (that range stays fixed). Switch it any time — the preview updates.">?</span>
     </div>
-    <div class="target-val" id="target-name">—</div>
+    <select id="target-select"></select>
   </div>
 
   <div class="row">
@@ -363,6 +401,7 @@
     <div class="drop-files-list" id="drop-files-list"></div>
   </div>
 
+<div id="page-synth">
   <div class="pgrid">
     <div class="param">
       <div class="lbl-row">
@@ -384,7 +423,7 @@ Large (500ms+) = smoother, more tonal.">?</span>
 More = smoother transitions, heavier CPU.">?</span>
       </div>
       <div class="sl-row">
-        <input type="range" id="overlap" min="0" max="75" step="5" value="50">
+        <input type="range" id="overlap" min="10" max="75" step="5" value="50">
         <span class="sl-val"><span id="ov-v">50</span>%</span>
       </div>
     </div>
@@ -535,8 +574,110 @@ Lower = random gaps — rhythmic holes.">?</span>
       <div class="net-val" id="dn-v">1.00</div>
     </div>
   </div>
+</div><!-- /page-synth -->
 
-  <div class="preview-section">
+<div id="page-prep" style="display:none">
+  <div class="row">
+    <div class="lbl-row">
+      <span class="lbl">Match engine</span>
+      <span class="help tip-down" data-tip="How target frames choose brain grains.
+Greedy = original SampleBrain (best match per frame).
+Smooth = Viterbi unit-selection: globally optimal sequence, stitches coherent runs from the source.
+Stickiness = run length. Voices = extra coherent layers from distinct material.">?</span>
+    </div>
+    <select id="match-mode">
+      <option value="greedy" selected>Greedy (original)</option>
+      <option value="smooth">Smooth (unit-selection)</option>
+    </select>
+    <div class="prep-hint">Smooth: Stickiness = run length · Voices = distinct coherent layers.</div>
+  </div>
+</div><!-- /page-prep -->
+
+<div id="page-design" style="display:none">
+  <div class="row">
+    <div class="lbl-row">
+      <span class="lbl">Sample Design · Audio Siblings</span>
+      <span class="help tip-down" data-tip="Batch random pitch-shifting (Audio Siblings, Y R A K I). Pitch = varispeed (changes length, no clicks): pitch up = shorter, down = longer.
+Uses your Brain sources (Synth tab) + dropped files. No target needed.
+Output: clips on a new 'SB Siblings' track + 24-bit WAVs in the extension folder + Live project.">?</span>
+    </div>
+    <div class="prep-hint">Uses your selected Brain sources / dropped files (Synth tab).</div>
+  </div>
+
+  <div class="row" style="padding-bottom:7px">
+    <div class="lbl-row">
+      <span class="lbl">Source · select a zone</span>
+      <span class="help" data-tip="Drag on the waveform to select the zone to turn into samples. Click once to clear (use the whole source). ▶ plays the selection.">?</span>
+    </div>
+    <div class="preview-canvas-wrap" style="height:64px"><canvas id="sd-canvas"></canvas></div>
+    <div class="preview-status-row">
+      <span id="sd-status">Select brain sources first</span>
+      <button class="btn-play" id="sd-play" disabled>▶</button>
+    </div>
+  </div>
+
+  <div class="pgrid">
+    <div class="param">
+      <div class="lbl-row"><span class="lbl">Semitones min</span><span class="help" data-tip="Lowest transposition (semitones). Negative = down.">?</span></div>
+      <div class="sl-row"><input type="range" id="sib-min" min="-24" max="0" step="1" value="-12"><span class="sl-val"><span id="smn-v">-12</span>st</span></div>
+    </div>
+    <div class="param">
+      <div class="lbl-row"><span class="lbl">Semitones max</span><span class="help" data-tip="Highest transposition (semitones). Positive = up.">?</span></div>
+      <div class="sl-row"><input type="range" id="sib-max" min="0" max="24" step="1" value="12"><span class="sl-val">+<span id="smx-v">12</span>st</span></div>
+    </div>
+    <div class="param">
+      <div class="lbl-row"><span class="lbl">Strategy</span><span class="help" data-tip="Which transpositions are allowed.
+Chromatic = any semitone.
+Major / Minor / Pentatonic = only scale-degree intervals → harmonically related siblings.">?</span></div>
+      <select id="sib-strategy">
+        <option value="chromatic" selected>Chromatic</option>
+        <option value="major">Major</option>
+        <option value="minor">Minor</option>
+        <option value="pentatonic">Pentatonic</option>
+      </select>
+    </div>
+    <div class="param">
+      <div class="lbl-row"><span class="lbl">Mode</span><span class="help" data-tip="Pitch = transposed variations per source.
+Layered = stack several randomly chosen + transposed copies.
+Slice = cut into individual one-shots (hats, claps, kick…).
+Automate = unique random pitch glides (varispeed automation at varying speeds).">?</span></div>
+      <select id="sib-mode">
+        <option value="pitch" selected>Pitch only</option>
+        <option value="layered">Layered</option>
+        <option value="slice">Slice (one-shots)</option>
+        <option value="automate">Automate (pitch glide)</option>
+      </select>
+    </div>
+    <div class="param">
+      <div class="lbl-row"><span class="lbl">Layers</span><span class="help" data-tip="Layered mode: how many transposed copies are stacked per output.">?</span></div>
+      <div class="sl-row"><input type="range" id="sib-layers" min="2" max="12" step="1" value="4"><span class="sl-val"><span id="sy-v">4</span></span></div>
+    </div>
+    <div class="param">
+      <div class="lbl-row"><span class="lbl">Count</span><span class="help" data-tip="How many samples to generate.
+Pitch = variations per source. Layered = stacked outputs.
+(Ignored in Slice — count = number of detected hits.)">?</span></div>
+      <div class="sl-row"><input type="range" id="sib-gens" min="1" max="32" step="1" value="8"><span class="sl-val"><span id="sg-v">8</span></span></div>
+    </div>
+  </div>
+
+  <div class="param-full">
+    <div class="lbl-row">
+      <span class="lbl">Auto-attenuation</span>
+      <span class="help" data-tip="Layered mode: scale each layer by 1/N to avoid clipping when stacking.">?</span>
+    </div>
+    <select id="sib-atten">
+      <option value="on" selected>On (1/N per layer)</option>
+      <option value="off">Off</option>
+    </select>
+  </div>
+
+  <div class="row" style="text-align:center;border-bottom:none;display:flex;gap:8px;justify-content:center">
+    <button class="btn btn-rnd" id="sd-rnd-synth">Randomize Synth &amp; Prep</button>
+    <button class="btn btn-gen" id="sib-gen" disabled>Generate samples &#9654;</button>
+  </div>
+</div><!-- /page-design -->
+
+  <div class="preview-section" id="preview-section">
     <div class="lbl-row">
       <span class="lbl">Preview</span>
       <span class="help" data-tip="Live preview of the synthesised output.
@@ -577,18 +718,42 @@ Click ▶ to audition before committing.">?</span>
     opts.headers = Object.assign({}, opts.headers, { 'X-SB-Token': __sbToken });
     return __origFetch(input, opts);
   };
-  document.getElementById('target-name').textContent = init.targetName;
 
+  // Non-blocking GitHub release check — shows a badge if a newer version is out
+  fetch('/check-update').then(r => r.ok ? r.json() : null).then(info => {
+    if (info && info.updateAvailable && info.latest) {
+      const b = document.getElementById('update-badge');
+      b.textContent = '↑ ' + info.latest;
+      b.style.display = 'inline-block';
+      b.onclick = () => openURL(info.url);
+    }
+  }).catch(() => {});
   const checked = new Set();
   const droppedFiles = [];
   const list = document.getElementById('track-list');
+  const targetSelect = document.getElementById('target-select');
+  let targetIndex = init.defaultTargetIndex;
 
-  if (!init.availableTracks.length) {
-    list.innerHTML = '<div class="no-tracks">No other audio tracks found</div>';
-  } else {
-    init.availableTracks.forEach(t => {
+  // Target dropdown — any audio track can be the target
+  init.tracks.forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = String(t.index);
+    opt.textContent = String(t.index+1).padStart(2,'0') + ' · ' + t.name;
+    targetSelect.appendChild(opt);
+  });
+  targetSelect.value = String(targetIndex);
+
+  // Brain source list — all tracks except the current target
+  function renderBrainList() {
+    list.innerHTML = '';
+    const others = init.tracks.filter(t => t.index !== targetIndex);
+    if (!others.length) {
+      list.innerHTML = '<div class="no-tracks">No other audio tracks found</div>';
+      return;
+    }
+    others.forEach(t => {
       const row = document.createElement('div');
-      row.className = 't-row';
+      row.className = 't-row' + (checked.has(t.index) ? ' on' : '');
       const check = document.createElement('div'); check.className = 't-check';
       const dot = document.createElement('div'); dot.className = 't-dot';
       check.appendChild(dot);
@@ -606,6 +771,15 @@ Click ▶ to audition before committing.">?</span>
       list.appendChild(row);
     });
   }
+  renderBrainList();
+
+  // Switching the target re-renders the brain list (excluding it) and re-previews
+  targetSelect.addEventListener('change', () => {
+    targetIndex = +targetSelect.value;
+    checked.delete(targetIndex); // a track can't be both target and brain
+    renderBrainList();
+    updateFooter();
+  });
 
   function renderDropFiles() {
     const container = document.getElementById('drop-files-list');
@@ -664,6 +838,7 @@ Click ▶ to audition before committing.">?</span>
   function updateFooter() {
     const n = checked.size + droppedFiles.length;
     document.getElementById('btn-gen').disabled = n === 0;
+    document.getElementById('sib-gen').disabled = n === 0;
     document.getElementById('ft-info').innerHTML =
       n === 0 ? 'Select brain sources'
               : '<span>' + n + '</span> source' + (n > 1 ? 's' : '') + ' &middot; ready';
@@ -673,6 +848,8 @@ Click ▶ to audition before committing.">?</span>
     } else {
       schedulePreview();
     }
+    // Refresh the Sample Design source waveform if that tab is open and sources changed
+    if (document.getElementById('page-design').style.display !== 'none') loadSdSource();
   }
 
   function sliderColors() {
@@ -729,9 +906,28 @@ Click ▶ to audition before committing.">?</span>
   bind('voices',      'vc-v', v => String(Math.round(v)));
   bind('reverse',     'rv-v', v => (v/100).toFixed(2));
   bind('density',     'dn-v', v => (v/100).toFixed(2));
+  bind('sib-min',    'smn-v', v => String(Math.round(v)));
+  bind('sib-max',    'smx-v', v => String(Math.round(v)));
+  bind('sib-layers', 'sy-v',  v => String(Math.round(v)));
+  bind('sib-gens',   'sg-v',  v => String(Math.round(v)));
 
   document.getElementById('descriptor-type').addEventListener('change', function() {
     document.getElementById('mfcc-row').style.display = this.value === 'mix' ? '' : 'none';
+  });
+
+  // ── TABS (Synth / Prep / Sample Design) ──
+  const PAGES = ['synth', 'prep', 'design'];
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const page = tab.dataset.page;
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+      PAGES.forEach(p => document.getElementById('page-' + p).style.display = p === page ? '' : 'none');
+      // The bottom Synth preview is irrelevant on Sample Design (it has its own source waveform)
+      document.getElementById('preview-section').style.display = page === 'design' ? 'none' : '';
+      // Footer "Generate" runs the Synth; on Sample Design use the in-page "Generate samples"
+      document.getElementById('btn-gen').style.display = page === 'design' ? 'none' : '';
+      if (page === 'design') loadSdSource();
+    });
   });
 
   function send(obj) {
@@ -760,7 +956,7 @@ Click ▶ to audition before committing.">?</span>
   };
   themeBtn.textContent = dark ? '◑' : '◐'; // reflect dark-by-default
 
-  document.getElementById('rnd-btn').addEventListener('click', () => {
+  function randomizeSynthPrep() {
     // Floor overrides: prevent near-silence values from randomization
     const rndMin = { 'density': 40, 'amp-weight': 50 };
     ['block-size', 'overlap', 'amp-weight', 'pitch-shift', 'pitch-var', 'novelty', 'boredom', 'stickiness', 'voices', 'reverse', 'density'].forEach(id => {
@@ -776,14 +972,24 @@ Click ▶ to audition before committing.">?</span>
     const descEl = document.getElementById('descriptor-type');
     descEl.value = descOpts[Math.floor(Math.random() * descOpts.length)];
     descEl.dispatchEvent(new Event('change'));
-  });
+    // Prep tab: also randomize the match engine
+    const mm = document.getElementById('match-mode');
+    mm.value = Math.random() < 0.5 ? 'greedy' : 'smooth';
+    mm.dispatchEvent(new Event('change'));
+    // If Sample Design is open, re-synthesise so its waveform reflects the new settings
+    if (document.getElementById('page-design').style.display !== 'none') loadSdSource();
+  }
+  document.getElementById('rnd-btn').addEventListener('click', randomizeSynthPrep);
+  document.getElementById('sd-rnd-synth').addEventListener('click', randomizeSynthPrep);
 
   // ── PREVIEW ──────────────────────────────────────────────────────────────
 
   function collectParams() {
     return {
+      targetTrackIndex: targetIndex,
       brainTrackIndices: Array.from(checked),
       droppedFiles: droppedFiles.map(f => f.path),
+      matchMode:     document.getElementById('match-mode').value,
       blockSizeMs:   +document.getElementById('block-size').value,
       overlapRatio:  +document.getElementById('overlap').value / 100,
       windowType:    document.getElementById('window-type').value,
@@ -798,6 +1004,15 @@ Click ▶ to audition before committing.">?</span>
       pitchShiftVar: +document.getElementById('pitch-var').value,
       reverse:       +document.getElementById('reverse').value / 100,
       density:       +document.getElementById('density').value / 100,
+      sibMinSt:      +document.getElementById('sib-min').value,
+      sibMaxSt:      +document.getElementById('sib-max').value,
+      sibStrategy:   document.getElementById('sib-strategy').value,
+      sibMode:       document.getElementById('sib-mode').value,
+      sibLayers:     +document.getElementById('sib-layers').value,
+      sibAutoAtten:  document.getElementById('sib-atten').value === 'on',
+      sibGenerations:+document.getElementById('sib-gens').value,
+      sibSelStart:   sdSel ? sdSel.start : -1,
+      sibSelEnd:     sdSel ? sdSel.end : -1,
     };
   }
 
@@ -859,6 +1074,27 @@ Click ▶ to audition before committing.">?</span>
     ctx2d.stroke();
   }
 
+  // Trim leading silence so playback starts on the first audible sample (keeps a 5ms
+  // pre-roll so the attack isn't clipped). Returns a fresh AudioBuffer.
+  function trimLeadingSilence(buf) {
+    const ch0 = buf.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < ch0.length; i++) { const a = Math.abs(ch0[i]); if (a > peak) peak = a; }
+    if (peak < 1e-5) return buf; // silent buffer — leave as-is
+    const thr = Math.max(0.002, peak * 0.02);
+    let onset = 0;
+    while (onset < ch0.length && Math.abs(ch0[onset]) < thr) onset++;
+    const preroll = Math.floor(buf.sampleRate * 0.005);
+    const start = Math.max(0, onset - preroll);
+    if (start <= 0 || start >= ch0.length - 1) return buf;
+    const newLen = ch0.length - start;
+    const out = getAudioCtx().createBuffer(buf.numberOfChannels, newLen, buf.sampleRate);
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      out.getChannelData(c).set(buf.getChannelData(c).subarray(start));
+    }
+    return out;
+  }
+
   async function runPreview() {
     const myId = ++previewReqId;
     setStatus('Rendering…', true);
@@ -886,10 +1122,10 @@ Click ▶ to audition before committing.">?</span>
       if (!res.ok) { const msg = await res.text().catch(() => ''); setStatus(msg || ('Error ' + res.status), false); return; }
       const arrayBuf = await res.arrayBuffer();
       if (myId !== previewReqId) return;
-      previewAudioBuf = await getAudioCtx().decodeAudioData(arrayBuf);
+      previewAudioBuf = trimLeadingSilence(await getAudioCtx().decodeAudioData(arrayBuf));
       if (myId !== previewReqId) return;
       drawWaveform(previewAudioBuf);
-      setStatus('Ready · click ▶ to audition', false);
+      setStatus('Ready · press SPACE or ▶ to play', false);
       playBtn.disabled = false;
     } catch (e) {
       if (myId === previewReqId) setStatus('—', false);
@@ -903,6 +1139,105 @@ Click ▶ to audition before committing.">?</span>
     clearTimeout(previewTimer);
     previewTimer = setTimeout(runPreview, 300);
   }
+
+  // ── SAMPLE DESIGN — source waveform + zone selection ──────────────────────
+  let sdBuf = null;       // AudioBuffer of the synthesis output shown in Sample Design
+  let sdSel = null;       // { start, end } fractions 0–1, or null
+  let sdOnsets = [];      // detected onset positions (fractions 0–1) — clickable hit markers
+  let sdSource = null;    // playing node
+  const sdCanvas = document.getElementById('sd-canvas');
+  const sdStatus = document.getElementById('sd-status');
+  const sdPlay = document.getElementById('sd-play');
+
+  function drawSd() {
+    if (!sdCanvas) return;
+    const W = sdCanvas.offsetWidth || 544, H = sdCanvas.offsetHeight || 64;
+    sdCanvas.width = W; sdCanvas.height = H;
+    const c = sdCanvas.getContext('2d');
+    c.clearRect(0, 0, W, H);
+    if (!sdBuf) return;
+    const cs = getComputedStyle(document.body);
+    const colFull = cs.getPropertyValue('--full').trim() || '#000';
+    const colLine = cs.getPropertyValue('--line2').trim() || 'rgba(0,0,0,.1)';
+    // selection highlight
+    if (sdSel) {
+      c.fillStyle = colFull; c.globalAlpha = 0.14;
+      c.fillRect(sdSel.start * W, 0, (sdSel.end - sdSel.start) * W, H);
+      c.globalAlpha = 1;
+    }
+    const data = sdBuf.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / W));
+    c.strokeStyle = colFull; c.globalAlpha = 0.75; c.lineWidth = 1; c.beginPath();
+    for (let x = 0; x < W; x++) {
+      let lo = 1, hi = -1;
+      for (let j = 0; j < step; j++) { const v = data[x * step + j] ?? 0; if (v < lo) lo = v; if (v > hi) hi = v; }
+      c.moveTo(x + 0.5, ((1 - hi) / 2) * H); c.lineTo(x + 0.5, ((1 - lo) / 2) * H);
+    }
+    c.stroke();
+    c.globalAlpha = 1; c.strokeStyle = colLine; c.beginPath(); c.moveTo(0, H / 2); c.lineTo(W, H / 2); c.stroke();
+    // onset markers — clickable hit boundaries
+    if (sdOnsets.length) {
+      c.strokeStyle = colFull; c.globalAlpha = 0.3; c.lineWidth = 1;
+      for (const f of sdOnsets) { const x = f * W; c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke(); }
+      c.globalAlpha = 1;
+    }
+  }
+
+  // The onset region (hit) containing fraction f → {start,end}, or null when no onsets
+  function onsetRegionAt(f) {
+    if (!sdOnsets.length) return null;
+    let i = 0; while (i < sdOnsets.length && sdOnsets[i] <= f) i++;
+    const start = i > 0 ? sdOnsets[i - 1] : 0;
+    const end = i < sdOnsets.length ? sdOnsets[i] : 1;
+    return end - start > 0.002 ? { start, end } : null;
+  }
+
+  // Source = the concatenative-synthesis output (same as the Synth preview). Re-synthesises
+  // each call (and on Randomize Synth & Prep) so the waveform reflects the plugin's output.
+  async function loadSdSource() {
+    if (checked.size + droppedFiles.length === 0) { sdBuf = null; sdSel = null; sdOnsets = []; drawSd(); sdStatus.textContent = 'Select brain sources first'; sdPlay.disabled = true; return; }
+    sdStatus.textContent = 'Synthesizing…';
+    try {
+      const res = await fetch('/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collectParams()) });
+      if (!res.ok) { const m = await res.text().catch(() => ''); sdStatus.textContent = m || 'Could not synthesize'; sdPlay.disabled = true; return; }
+      sdBuf = await getAudioCtx().decodeAudioData(await res.arrayBuffer());
+      sdSel = null; sdOnsets = [];
+      drawSd();
+      sdStatus.textContent = 'Drag a zone, or click a hit (markers)';
+      sdPlay.disabled = false;
+      // Fetch onset markers for the output just shown (cached server-side as lastSdOutput)
+      fetch('/sd-onsets').then(r => r.ok ? r.json() : null).then(j => { sdOnsets = (j && j.onsets) || []; drawSd(); }).catch(() => {});
+    } catch { sdStatus.textContent = 'Could not synthesize'; }
+  }
+
+  if (sdCanvas) {
+    let dragging = false, x0 = 0, moved = false;
+    const frac = (e) => { const r = sdCanvas.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+    sdCanvas.addEventListener('mousedown', (e) => { if (!sdBuf) return; dragging = true; x0 = frac(e); moved = false; });
+    sdCanvas.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const x1 = frac(e);
+      if (Math.abs(x1 - x0) > 0.005) moved = true;
+      if (moved) { sdSel = { start: Math.min(x0, x1), end: Math.max(x0, x1) }; drawSd(); }
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return; dragging = false;
+      if (!moved) sdSel = onsetRegionAt(x0); // click on a hit → select that hit's region (null = whole)
+      drawSd();
+      sdStatus.textContent = sdSel ? ('Zone ' + Math.round(sdSel.start * 100) + '–' + Math.round(sdSel.end * 100) + '%') : 'Whole output';
+    });
+  }
+
+  sdPlay.addEventListener('click', () => {
+    if (!sdBuf) return;
+    if (sdSource) { try { sdSource.stop(); } catch {} sdSource = null; sdPlay.textContent = '▶'; return; }
+    const ac = getAudioCtx();
+    const src = ac.createBufferSource(); src.buffer = sdBuf; src.connect(ac.destination);
+    const off = sdSel ? sdSel.start * sdBuf.duration : 0;
+    const dur = sdSel ? (sdSel.end - sdSel.start) * sdBuf.duration : sdBuf.duration;
+    src.onended = () => { sdSource = null; sdPlay.textContent = '▶'; };
+    src.start(0, off, dur); sdSource = src; sdPlay.textContent = '■';
+  });
 
   playBtn.addEventListener('click', () => {
     if (!previewAudioBuf) return;
@@ -925,20 +1260,23 @@ Click ▶ to audition before committing.">?</span>
   // Hook all param changes → schedule preview
   ['block-size','overlap','amp-weight','pitch-shift','pitch-var','novelty','boredom','stickiness','mfcc-ratio','voices','reverse','density']
     .forEach(id => document.getElementById(id).addEventListener('input', schedulePreview));
-  ['window-type','descriptor-type']
+  ['window-type','descriptor-type','match-mode']
     .forEach(id => document.getElementById(id).addEventListener('change', schedulePreview));
 
   document.getElementById('btn-cancel').onclick = () => send({ cancelled: true });
-  document.getElementById('btn-gen').onclick = () => send(Object.assign({ cancelled: false }, collectParams()));
+  document.getElementById('btn-gen').onclick = () => send(Object.assign({ cancelled: false, mode: 'synth' }, collectParams()));
+  document.getElementById('sib-gen').onclick = () => send(Object.assign({ cancelled: false, mode: 'sample-design' }, collectParams()));
 
-  // Spacebar → toggle preview playback (ignored while a field/control has focus)
+  // Spacebar → play. On Sample Design it plays the selected zone; elsewhere the Synth preview.
   document.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' && e.key !== ' ') return;
     const t = e.target, tag = t && t.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
-    if (playBtn.disabled) return;
+    const onDesign = document.getElementById('page-design').style.display !== 'none';
+    const btn = onDesign ? sdPlay : playBtn;
+    if (btn.disabled) return;
     e.preventDefault();
-    playBtn.click();
+    btn.click();
   });
 </script>
 </body>
