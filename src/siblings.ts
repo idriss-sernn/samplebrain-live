@@ -286,14 +286,17 @@ export function generateSiblings(
   const out: Sibling[] = [];
 
   if (params.mode === "slice") {
-    // Cut each source into one-shots and classify each by spectral analysis
+    // Cut each source into one-shots, classify on the DRY transient (so the type stays accurate),
+    // then bake a random pitch glide into every hit — a kick that drops, a hat that zips up, etc.
+    // Slices never come out dry; the glide is what gives each one-shot its movement.
     for (const src of usable) {
       const slices = sliceSource(src.pcm, src.sampleRate);
       const counts: Record<string, number> = {};
-      for (const pcm of slices) {
-        const type = classifySlice(pcm, src.sampleRate);
+      for (const dry of slices) {
+        const type = classifySlice(dry, src.sampleRate);
         counts[type] = (counts[type] ?? 0) + 1;
-        out.push({ pcm, sampleRate: src.sampleRate, label: `${type} ${counts[type]}`, sourceName: src.name });
+        const { env, from, to } = randomEnvelope(minSt, maxSt, strategy);
+        out.push({ pcm: pitchAutomate(dry, env), sampleRate: src.sampleRate, label: `${type} ${counts[type]} ${labelFor(from)}→${labelFor(to)}`, sourceName: src.name });
       }
     }
     return out;
