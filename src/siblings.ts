@@ -138,6 +138,30 @@ function pitchAutomate(pcm: Float64Array, env: Float64Array): Float64Array {
   return out;
 }
 
+// One-shot "blow-out" glide: hold the pitch dead flat through the attack (read 1:1 so the transient
+// stays punchy and intact), then bend HARD into the tail with an accelerating cubic curve so the
+// decay falls apart. Extremity scales with the SEMITONES range (×1.5–2.5) and biases toward dives —
+// downward bends stretch the tail into a long collapsing rumble; upward bends zip it into a chirp.
+function blowoutSlice(pcm: Float64Array, minSt: number, maxSt: number): { pcm: Float64Array; reach: number } {
+  const N = pcm.length;
+  if (N < 4) return { pcm: pcm.slice(), reach: 0 };
+  // Find the attack peak; hold flat to just past it so the transient is never touched.
+  let peak = 0, peakIdx = 0;
+  for (let i = 0; i < N; i++) { const a = Math.abs(pcm[i]!); if (a > peak) { peak = a; peakIdx = i; } }
+  const holdFrac = Math.min(0.45, (peakIdx + N * 0.04) / N); // capped so there's always a tail to bend
+  const reachMax = Math.max(Math.abs(minSt), Math.abs(maxSt), 6);
+  const down = maxSt <= 0 ? true : minSt >= 0 ? false : Math.random() < 0.6; // favour dives
+  const reach = (down ? -1 : 1) * reachMax * (1.5 + Math.random()); // 1.5–2.5× the range = extreme
+  const env = new Float64Array(AUTO_E);
+  for (let i = 0; i < AUTO_E; i++) {
+    const t = i / (AUTO_E - 1);
+    if (t <= holdFrac) { env[i] = 0; continue; }     // transient: untouched
+    const u = (t - holdFrac) / (1 - holdFrac);       // 0..1 across the decay
+    env[i] = reach * u * u * u;                       // cubic: motion intensifies toward the tail
+  }
+  return { pcm: pitchAutomate(pcm, env), reach: Math.round(reach) };
+}
+
 // ── Onset detection (spectral flux) + slicing into one-shots ────────────────
 // Cuts a loop into its individual hits (hats, claps, kick…) so Sample Design can
 // output separate one-shots instead of one whole pitched loop.
@@ -295,8 +319,8 @@ export function generateSiblings(
       for (const dry of slices) {
         const type = classifySlice(dry, src.sampleRate);
         counts[type] = (counts[type] ?? 0) + 1;
-        const { env, from, to } = randomEnvelope(minSt, maxSt, strategy);
-        out.push({ pcm: pitchAutomate(dry, env), sampleRate: src.sampleRate, label: `${type} ${counts[type]} ${labelFor(from)}→${labelFor(to)}`, sourceName: src.name });
+        const { pcm, reach } = blowoutSlice(dry, minSt, maxSt);
+        out.push({ pcm, sampleRate: src.sampleRate, label: `${type} ${counts[type]} ${labelFor(reach)}`, sourceName: src.name });
       }
     }
     return out;
