@@ -75,16 +75,22 @@ const labelFor = (st: number): string => `${st >= 0 ? "+" : ""}${st}st`;
 // ── Pitch automation (like a clip Transposition envelope, baked into the audio) ──
 // A random clean envelope shape (ramp up/down, exponential ease, peak/return) drives a
 // continuous varispeed read, so the pitch glides audibly across the sample. The SDK can't
-// write Live clip envelopes, so we bake it; varispeed means the sweep also changes length.
+// write Live clip envelopes, so we bake it. The sweep is even across the OUTPUT timeline
+// (what you hear), so the glide is felt from start to end rather than collapsing into the
+// first instant when pitching up.
 
 const AUTO_E = 256;
 
 // Random transposition envelope (semitones over normalised time 0..1), clean directional shapes.
 function randomEnvelope(minSt: number, maxSt: number, strategy: Strategy): Float64Array {
   const up = Math.random() < 0.5 && maxSt > 0;
-  const depth = up
+  let depth = up
     ? pickSemitone(0, Math.max(0, maxSt), strategy)
     : pickSemitone(Math.min(0, minSt), 0, strategy);
+  // Guarantee an audible sweep: a depth of 0 (or ±1) glides imperceptibly. Push it to at
+  // least ±2 st when the range allows, keeping the original direction.
+  const reach = up ? Math.max(0, maxSt) : Math.abs(Math.min(0, minSt));
+  if (reach > 0 && Math.abs(depth) < Math.min(2, reach)) depth = (up ? 1 : -1) * Math.min(2, reach);
   const shape = Math.floor(Math.random() * 4);
   const env = new Float64Array(AUTO_E);
   for (let i = 0; i < AUTO_E; i++) {
@@ -99,23 +105,30 @@ function randomEnvelope(minSt: number, maxSt: number, strategy: Strategy): Float
   return env;
 }
 
-// Varispeed driven by the envelope: the read position advances by the current rate each
-// output sample, so the pitch glides continuously and audibly (like a tape speeding up /
-// slowing down). Length changes with the sweep — that's what makes the motion clearly heard.
+// Varispeed driven by the envelope, paced by OUTPUT time. The output length is derived from
+// the envelope's average playback rate (outLen ≈ N / avgRate), so reading the source at the
+// per-output-sample rate consumes exactly the whole source while the pitch envelope evolves
+// EVENLY across what you hear. Indexing by the read position instead would race through the
+// envelope whenever the pitch rises, collapsing the glide into the first instant.
 function pitchAutomate(pcm: Float64Array, env: Float64Array): Float64Array {
   const N = pcm.length;
   if (N < 2) return pcm.slice();
-  const cap = N * 6; // guard against very low pitch (slow read → long output)
-  const out = new Float64Array(cap);
-  let pos = 0, n = 0;
-  while (pos < N - 1 && n < cap) {
-    const idx = Math.floor(pos), frac = pos - idx;
+  // Average rate over the sweep → output length that makes the read land on the source end.
+  let avgRate = 0;
+  for (let i = 0; i < AUTO_E; i++) avgRate += Math.pow(2, env[i]! / 12);
+  avgRate /= AUTO_E;
+  const outLen = Math.max(2, Math.min(N * 6, Math.round(N / Math.max(avgRate, 1e-6))));
+  const out = new Float64Array(outLen);
+  let pos = 0;
+  for (let n = 0; n < outLen; n++) {
+    const idx = Math.min(Math.floor(pos), N - 1), frac = pos - idx;
     const a = pcm[idx]!, b = idx + 1 < N ? pcm[idx + 1]! : a;
-    out[n++] = a + frac * (b - a);
-    const st = env[Math.min(AUTO_E - 1, Math.floor((pos / N) * AUTO_E))]!;
+    out[n] = a + frac * (b - a);
+    const st = env[Math.min(AUTO_E - 1, Math.floor((n / outLen) * AUTO_E))]!;
     pos += Math.pow(2, st / 12);
+    if (pos > N - 1) pos = N - 1; // ride the tail instead of cutting if rounding overshoots
   }
-  return out.slice(0, n);
+  return out;
 }
 
 // ── Onset detection (spectral flux) + slicing into one-shots ────────────────
@@ -293,7 +306,7 @@ export function generateSiblings(
 
   if (params.mode === "automate") {
     // N variations per source, each with a unique random pitch-transposition envelope (baked,
-    // length-preserving) — like dropping a random clip Transposition automation on each sample
+    // even sweep across the output) — like dropping a random clip Transposition automation
     const gens = Math.max(1, Math.round(params.generations));
     for (const src of usable) {
       for (let g = 0; g < gens; g++) {

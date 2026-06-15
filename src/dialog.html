@@ -363,7 +363,7 @@
   <div class="hd-left">
     <div style="display:flex;align-items:baseline;gap:7px">
       <div class="hd-title" id="sb-link" style="cursor:pointer" title="Open SampleBrain on GitLab">SampleBrain</div>
-      <span class="hd-ver" style="font-size:9px;font-weight:600;letter-spacing:.5px;opacity:.45">v1.2.0</span>
+      <span class="hd-ver" id="sb-ver" style="font-size:9px;font-weight:600;letter-spacing:.5px;opacity:.45">v1.2.2</span>
       <span class="update-badge" id="update-badge" title="Open the latest release"></span>
     </div>
     <div class="hd-sub">Concatenative synthesis · Aphex Twin · Dave Griffiths</div>
@@ -710,6 +710,8 @@ Click ▶ to audition before committing.">?</span>
   if (B64) document.getElementById('at-logo').src = 'data:image/png;base64,' + B64;
 
   const init = window.__SB_INIT__;
+  // Version label is driven by the extension's APP_VERSION — never hand-edit the span again
+  if (init && init.version) { const v = document.getElementById('sb-ver'); if (v) v.textContent = 'v' + init.version; }
   // Attach session token to every same-origin request (server rejects untokened calls)
   const __sbToken = window.__SB_TOKEN__ || '';
   const __origFetch = window.fetch.bind(window);
@@ -848,8 +850,8 @@ Click ▶ to audition before committing.">?</span>
     } else {
       schedulePreview();
     }
-    // Refresh the Sample Design source waveform if that tab is open and sources changed
-    if (document.getElementById('page-design').style.display !== 'none') loadSdSource();
+    // Refresh the Sample Design source waveform if that tab is open and sources changed (debounced)
+    if (document.getElementById('page-design').style.display !== 'none') scheduleSdSource();
   }
 
   function sliderColors() {
@@ -1022,6 +1024,8 @@ Click ▶ to audition before committing.">?</span>
   let audioCtx = null;
   let isPlaying = false;
   let previewTimer = null;
+  let sdReqId = 0;        // Sample Design synth request token — drops stale responses
+  let sdTimer = null;     // debounce for repeated loadSdSource() triggers
 
   const statusEl = document.getElementById('preview-status');
   const playBtn  = document.getElementById('btn-play');
@@ -1194,20 +1198,30 @@ Click ▶ to audition before committing.">?</span>
 
   // Source = the concatenative-synthesis output (same as the Synth preview). Re-synthesises
   // each call (and on Randomize Synth & Prep) so the waveform reflects the plugin's output.
+  // Debounced entry point — collapses rapid retriggers (source toggles, tab switches) into one synth
+  function scheduleSdSource() {
+    clearTimeout(sdTimer);
+    sdTimer = setTimeout(loadSdSource, 300);
+  }
+
   async function loadSdSource() {
     if (checked.size + droppedFiles.length === 0) { sdBuf = null; sdSel = null; sdOnsets = []; drawSd(); sdStatus.textContent = 'Select brain sources first'; sdPlay.disabled = true; return; }
+    const myId = ++sdReqId;   // any newer call invalidates this one
     sdStatus.textContent = 'Synthesizing…';
     try {
       const res = await fetch('/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collectParams()) });
+      if (myId !== sdReqId) return;
       if (!res.ok) { const m = await res.text().catch(() => ''); sdStatus.textContent = m || 'Could not synthesize'; sdPlay.disabled = true; return; }
-      sdBuf = await getAudioCtx().decodeAudioData(await res.arrayBuffer());
+      const decoded = await getAudioCtx().decodeAudioData(await res.arrayBuffer());
+      if (myId !== sdReqId) return;
+      sdBuf = decoded;
       sdSel = null; sdOnsets = [];
       drawSd();
       sdStatus.textContent = 'Drag a zone, or click a hit (markers)';
       sdPlay.disabled = false;
       // Fetch onset markers for the output just shown (cached server-side as lastSdOutput)
-      fetch('/sd-onsets').then(r => r.ok ? r.json() : null).then(j => { sdOnsets = (j && j.onsets) || []; drawSd(); }).catch(() => {});
-    } catch { sdStatus.textContent = 'Could not synthesize'; }
+      fetch('/sd-onsets').then(r => r.ok ? r.json() : null).then(j => { if (myId === sdReqId) { sdOnsets = (j && j.onsets) || []; drawSd(); } }).catch(() => {});
+    } catch { if (myId === sdReqId) sdStatus.textContent = 'Could not synthesize'; }
   }
 
   if (sdCanvas) {

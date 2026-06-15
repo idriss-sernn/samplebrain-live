@@ -20,8 +20,14 @@ import { decodeWav, encodeWav, resampleLinear } from "./wav.js";
 import { generateSiblings, detectOnsetFractions } from "./siblings.js";
 
 // ⚠️ Keep in sync with manifest.json / package.json on every release.
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.2";
 const REPO = "idriss-sernn/samplebrain-live";
+
+// Hard cap on how much audio (seconds) is rendered + analysed per source/target. Concatenative
+// synthesis only needs a slice of material; without this, a brain track spanning a multi-minute
+// arrangement renders in full, then synthesize()'s O(target×brain) loop blocks the event loop for
+// minutes — which freezes the modal and, with it, all of Live. Raise it if you need more variety.
+const MAX_SOURCE_SECONDS = 30;
 
 // Largest block size (samples) that still yields ≥1 grain from both the target and at
 // least one brain source. The requested size is clamped to this instead of erroring out.
@@ -44,6 +50,13 @@ async function decodeAudioRobust(p: string) {
     console.warn(`SampleBrain: fs read restricted on "${p}" — retrying "${alt}"`);
     return await decodeWav(alt);
   }
+}
+
+// Belt-and-suspenders bound on analysed audio: even if the beats→seconds render cap is off (tempo
+// automation, odd clip layouts), trimming the decoded PCM guarantees synthesize() can't blow up.
+function clampPcm(d: { samples: Float64Array; sampleRate: number }): { samples: Float64Array; sampleRate: number } {
+  const max = Math.floor(MAX_SOURCE_SECONDS * d.sampleRate);
+  return d.samples.length > max ? { samples: d.samples.subarray(0, max), sampleRate: d.sampleRate } : d;
 }
 
 // Returns true when `latest` is a strictly newer semver than `current` (tolerates a "v" prefix).
@@ -136,6 +149,7 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     tracks: allAudio.map((t, i) => ({ index: i, name: t.name })),
     defaultTargetIndex,
     sessionToken,
+    version: APP_VERSION, // drives the UI version label — single source of truth, can't drift
   };
 
   let pendingPreviewId = 0;
@@ -252,6 +266,9 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     const needsTarget = !cachedTargetPcm || cachedTargetIndex !== targetIdx;
     const needsBrain = brainKey !== cachedBrainKey;
 
+    // Render cap in beats — keeps Live's pre-FX render bounded too, not just the JS synthesis
+    const maxBeats = (MAX_SOURCE_SECONDS * song.tempo) / 60;
+
     if (needsTarget || needsBrain) {
       // Count items that will actually be rendered to show accurate progress
       const tracksWithClips = needsBrain
@@ -264,10 +281,11 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
     }
 
     if (needsTarget) {
-      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrk, selStart, selEnd);
+      const tgtEnd = Math.min(selEnd, selStart + maxBeats);
+      const targetWavPath = await ctx.resources.renderPreFxAudio(targetTrk, selStart, tgtEnd);
       console.log(`SampleBrain: render path="${targetWavPath}" tempDir="${ctx.environment.tempDirectory}"`);
       if (stale()) { res.writeHead(409).end(); return; }
-      const decoded = await decodeAudioRobust(targetWavPath);
+      const decoded = clampPcm(await decodeAudioRobust(targetWavPath));
       if (stale()) { res.writeHead(409).end(); return; }
       cachedTargetPcm = decoded;
       cachedTargetIndex = targetIdx;
@@ -282,17 +300,18 @@ async function run(ctx: Ctx, selection: ArrangementSelection): Promise<void> {
         if (stale()) { res.writeHead(409).end(); return; }
         const track = allAudio[idx];
         if (!track || track.arrangementClips.length === 0) continue;
-        const brainEnd = track.arrangementClips.reduce((m, c) => Math.max(m, c.endTime), 0);
+        const rawEnd = track.arrangementClips.reduce((m, c) => Math.max(m, c.endTime), 0);
+        const brainEnd = Math.min(rawEnd, maxBeats);
         const brainWavPath = await ctx.resources.renderPreFxAudio(track, 0, brainEnd);
         if (stale()) { res.writeHead(409).end(); return; }
-        const brainData = await decodeAudioRobust(brainWavPath);
+        const brainData = clampPcm(await decodeAudioRobust(brainWavPath));
         newPcms.push(brainData.samples);
         renderProgress.done++;
       }
       for (const filePath of p.droppedFiles) {
         if (stale()) { res.writeHead(409).end(); return; }
         if (![".wav", ".aif", ".aiff"].includes(path.extname(filePath).toLowerCase())) continue; // #7: only ever read audio paths
-        try { newPcms.push((await decodeAudioRobust(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
+        try { newPcms.push(clampPcm(await decodeAudioRobust(filePath)).samples); renderProgress.done++; } catch { /* skip */ }
       }
       if (!stale()) { cachedBrainKey = brainKey; cachedBrainPcms = newPcms; }
     }

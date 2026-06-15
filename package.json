@@ -1,7 +1,7 @@
 {
   "name": "samplebrain",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.2",
   "type": "module",
   "main": "dist/extension.js",
   "engines": { "node": ">=22.11.0" },
