@@ -81,28 +81,35 @@ const labelFor = (st: number): string => `${st >= 0 ? "+" : ""}${st}st`;
 
 const AUTO_E = 256;
 
-// Random transposition envelope (semitones over normalised time 0..1), clean directional shapes.
-function randomEnvelope(minSt: number, maxSt: number, strategy: Strategy): Float64Array {
-  const up = Math.random() < 0.5 && maxSt > 0;
-  let depth = up
-    ? pickSemitone(0, Math.max(0, maxSt), strategy)
-    : pickSemitone(Math.min(0, minSt), 0, strategy);
-  // Guarantee an audible sweep: a depth of 0 (or ±1) glides imperceptibly. Push it to at
-  // least ±2 st when the range allows, keeping the original direction.
-  const reach = up ? Math.max(0, maxSt) : Math.abs(Math.min(0, minSt));
-  if (reach > 0 && Math.abs(depth) < Math.min(2, reach)) depth = (up ? 1 : -1) * Math.min(2, reach);
+// Random transposition envelope: a glide between TWO endpoints (semitones over normalised time
+// 0..1), not a wobble around the original pitch. Anchoring every glide at 0st (as before) made
+// them all sound alike and timid; picking two real endpoints with a guaranteed interval makes the
+// sweep clearly heard and musically varied (e.g. −5→+5, or +7 sliding back down to 0).
+function randomEnvelope(minSt: number, maxSt: number, strategy: Strategy): { env: Float64Array; from: number; to: number } {
+  const span = maxSt - minSt;
+  let a = pickSemitone(minSt, maxSt, strategy);
+  let b = pickSemitone(minSt, maxSt, strategy);
+  // Force an audible interval: anything under ~3st barely reads as a glide. Push b away from a,
+  // keeping it inside the range and preserving a random direction where possible.
+  const minInterval = Math.min(3, span);
+  if (span > 0 && Math.abs(b - a) < minInterval) {
+    const dir = b >= a ? 1 : -1;
+    b = a + dir * minInterval;
+    if (b > maxSt || b < minSt) b = a - dir * minInterval; // flip if we ran off the edge
+    b = Math.max(minSt, Math.min(maxSt, b));
+  }
   const shape = Math.floor(Math.random() * 4);
   const env = new Float64Array(AUTO_E);
   for (let i = 0; i < AUTO_E; i++) {
     const t = i / (AUTO_E - 1);
-    let v: number;
-    if (shape === 0) v = t;                       // linear ramp
-    else if (shape === 1) v = 1 - (1 - t) * (1 - t); // ease-out (fast then settle)
-    else if (shape === 2) v = t * t;              // ease-in (slow then fast)
-    else v = Math.sin(t * Math.PI);               // rise then return to 0 (peak/valley)
-    env[i] = depth * v;
+    let c: number;                                       // 0..1 progress along the glide
+    if (shape === 0) c = t;                              // linear
+    else if (shape === 1) c = 1 - (1 - t) * (1 - t);     // ease-out (fast then settle)
+    else if (shape === 2) c = t * t;                     // ease-in (slow then accelerate)
+    else c = (1 - Math.cos(t * Math.PI)) / 2;            // smoothstep S-curve
+    env[i] = a + (b - a) * c;
   }
-  return env;
+  return { env, from: a, to: b };
 }
 
 // Varispeed driven by the envelope, paced by OUTPUT time. The output length is derived from
@@ -310,8 +317,8 @@ export function generateSiblings(
     const gens = Math.max(1, Math.round(params.generations));
     for (const src of usable) {
       for (let g = 0; g < gens; g++) {
-        const env = randomEnvelope(minSt, maxSt, strategy);
-        out.push({ pcm: pitchAutomate(src.pcm, env), sampleRate: src.sampleRate, label: `glide ${g + 1}`, sourceName: src.name });
+        const { env, from, to } = randomEnvelope(minSt, maxSt, strategy);
+        out.push({ pcm: pitchAutomate(src.pcm, env), sampleRate: src.sampleRate, label: `${labelFor(from)}→${labelFor(to)}`, sourceName: src.name });
       }
     }
     return out;
